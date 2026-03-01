@@ -3,7 +3,7 @@
 > A futuristic AI-powered desktop assistant built with **Electron + React + Vite**.
 
 Friday Desktop is a modern AI workspace application designed with a cinematic futuristic interface and built for scalability.  
-The project is structured for clean frontend/backend separation and team collaboration.
+The architecture is modular, cleanly separated (frontend + backend), and structured for team collaboration.
 
 ---
 
@@ -23,74 +23,90 @@ The project is structured for clean frontend/backend separation and team collabo
 
 ---
 
-## 🧠 Features (Frontend)
+## 🧠 Features
 
 - Futuristic AI dashboard UI
 - Animated voice orb (GPU optimized)
-- Glassmorphism interface
+- Glassmorphism dark interface
 - Sidebar navigation layout
-- Chat panel placeholder
-- System monitor placeholder
-- Modular page routing structure
-- Team-ready architecture
+- Chat panel (UI placeholder)
+- System monitor (UI placeholder)
+- Modular routing structure
+- Clean scalable architecture
+- Team-ready repository structure
 
 ---
 
 ## 📂 Project Structure
+
+```
 friday-desktop/
 │
-├── main/                 # Electron main process
-├── renderer/             # React frontend (Vite)
+├── main/                     # Electron main process
+│
+├── renderer/                 # React frontend (Vite)
 │   ├── src/
 │   │   ├── components/
 │   │   ├── pages/
 │   │   ├── layout/
 │   │   └── index.css
 │
-├── backend/              # Backend API (separate service)
+├── backend/                  # Backend API (separate service)
 │   └── src/server.js
 │
 ├── package.json
 └── README.md
+```
+
 ---
 
 ## 🛠 Installation
 
 ### 1️⃣ Clone Repository
 
+```bash
 git clone https://github.com/YOUR_USERNAME/friday-desktop.git
 cd friday-desktop
+```
 
 ---
 
 ## 🖥 Run Frontend (Electron + React)
 
+```bash
 npm install
 npm run dev
-This starts:
+```
+
+This will start:
 - Vite Dev Server (Renderer)
-- Electron App
+- Electron Application
 
 ---
 
 ## ⚙ Run Backend (API Server)
 
+```bash
 cd backend
 npm install
 node src/server.js
+```
 
 Backend runs on:
+
+```
 http://localhost:5000
+```
 
 ---
 
 ## 🌿 Branch Strategy
 
-| Branch | Purpose |
-|--------|---------|
-| `main` | Stable production-ready code |
-| `frontend-dev` | UI & layout updates |
-| `backend-dev` | API & server development |
+| Branch         | Purpose                        |
+|---------------|--------------------------------|
+| main          | Stable production-ready code   |
+| frontend-dev  | UI & layout updates            |
+| backend-dev   | API & server development       |
 
 ---
 
@@ -98,17 +114,19 @@ http://localhost:5000
 
 To add contributors:
 
-1. Go to Repository → Settings
-2. Click **Collaborators**
-3. Invite by GitHub username
+1. Go to Repository → Settings  
+2. Click "Collaborators"  
+3. Invite by GitHub username  
 
 ---
 
 ## 🚀 Production Build
 
-To package the app:
+To package the desktop application:
 
+```bash
 npm run build
+```
 
 Electron Builder will generate:
 - macOS `.dmg`
@@ -124,14 +142,15 @@ Electron Builder will generate:
 - [ ] Authentication system
 - [ ] Database integration
 - [ ] Production auto-deployment
+- [ ] Cloud sync support
 
 ---
 
 ## 🔒 Security Notes
 
-- No sensitive keys should be committed.
-- Use `.env` files for API keys.
-- Backend and frontend remain modular for security separation.
+- Never commit API keys.
+- Use `.env` files for sensitive credentials.
+- Keep backend and frontend modular for better security.
 
 ---
 
@@ -147,16 +166,15 @@ Developed by the Friday Team.
 
 ---
 
-### 🌌 Vision
+## 🌌 Vision
 
-Friday Desktop aims to become a modular AI workspace platform with:
+Friday Desktop aims to become a modular AI workspace platform featuring:
 
-- Voice interaction
-- Intelligent automation
-- Workflow orchestration
-- Cross-platform support
+- Voice interaction  
+- Intelligent automation  
+- Workflow orchestration  
+- Cross-platform support  
 
 ---
 
-
-
+Built with precision, performance, and futuristic design principles.
