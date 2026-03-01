@@ -1,0 +1,35 @@
+{
+  "name": "friday-desktop",
+  "version": "1.0.0",
+  "main": "main/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "npm --prefix renderer run dev -- --host 127.0.0.1 --port 5173",
+    "dev:electron": "wait-on http://127.0.0.1:5173 && cross-env electron .",
+    "build": "electron-builder"
+  },
+  "build": {
+    "appId": "com.friday.ai",
+    "mac": {
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "^1.2.4",
+    "class-variance-authority": "^0.7.1",
+    "concurrently": "^8.0.0",
+    "cross-env": "^7.0.3",
+    "framer-motion": "^12.34.3",
+    "lucide-react": "^0.575.0",
+    "ogl": "^1.0.11",
+    "systeminformation": "^5.31.1",
+    "wait-on": "^7.0.1"
+  }
+}
