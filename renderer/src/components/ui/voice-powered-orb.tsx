@@ -109,7 +109,7 @@ export default function VoicePoweredOrb({ className }: { className?: string }) {
         onClick={() => setMicOn((prev) => !prev)}
         className={cn(
           "mt-5 grid h-16 w-16 place-items-center rounded-full border border-white/20 bg-[#111111]/90 text-white transition",
-          micOn ? "shadow-[0_0_24px_rgba(255,255,255,0.25)]" : "opacity-70",
+          micOn ? "shadow-[0_0_32px_rgba(255,255,255,0.35),0_0_16px_rgba(0,217,255,0.25)]" : "opacity-70 shadow-[0_0_20px_rgba(0,0,0,0.4)]",
         )}
         aria-label={micOn ? "Turn mic off" : "Turn mic on"}
       >

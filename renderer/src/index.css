@@ -32,10 +32,20 @@
 @keyframes orb-breathe {
   0%,
   100% {
-    box-shadow: 0 0 28px rgba(255, 255, 255, 0.16), 0 0 80px rgba(255, 255, 255, 0.07);
+    box-shadow: 0 0 36px rgba(255, 255, 255, 0.22), 0 0 100px rgba(255, 255, 255, 0.11), 0 0 160px rgba(0, 217, 255, 0.05);
   }
   50% {
-    box-shadow: 0 0 52px rgba(255, 255, 255, 0.32), 0 0 120px rgba(255, 255, 255, 0.12);
+    box-shadow: 0 0 64px rgba(255, 255, 255, 0.4), 0 0 140px rgba(255, 255, 255, 0.18), 0 0 200px rgba(0, 217, 255, 0.08);
+  }
+}
+
+@keyframes cyan-glow {
+  0%,
+  100% {
+    text-shadow: 0 0 12px rgba(0, 217, 255, 0.2);
+  }
+  50% {
+    text-shadow: 0 0 24px rgba(0, 217, 255, 0.4);
   }
 }
 
@@ -127,7 +137,7 @@
   }
 
   .sidebar-glass {
-    background: linear-gradient(180deg, rgba(18, 18, 18, 0.9), rgba(8, 8, 8, 0.88));
+    background: linear-gradient(180deg, rgba(18, 18, 18, 0.92), rgba(8, 8, 8, 0.9));
     backdrop-filter: blur(12px);
   }
 
@@ -185,6 +195,7 @@
     display: grid;
     place-items: center;
     animation: orb-breathe 5.4s ease-in-out infinite;
+    box-shadow: 0 0 36px rgba(255, 255, 255, 0.22), 0 0 100px rgba(255, 255, 255, 0.11), 0 0 160px rgba(0, 217, 255, 0.05);
   }
 
   .orb-core-inner {
@@ -197,7 +208,7 @@
 
   .orb-voice-bar-active {
     background: linear-gradient(to top, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.95));
-    box-shadow: 0 0 12px rgba(255, 255, 255, 0.6);
+    box-shadow: 0 0 16px rgba(255, 255, 255, 0.8), 0 0 8px rgba(0, 217, 255, 0.4);
     animation: meter-flicker 0.9s ease-in-out infinite;
   }
 

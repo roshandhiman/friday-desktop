@@ -41,7 +41,7 @@ function MeterRow({
 
       <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
         <motion.div
-          className="h-full rounded-full bg-gradient-to-r from-white/65 to-white"
+          className="h-full rounded-full bg-gradient-to-r from-white/65 to-white shadow-[0_0_12px_rgba(255,255,255,0.6),0_0_6px_rgba(0,217,255,0.3)]"
           animate={{ width: `${normalized}%` }}
           transition={{ duration: 0.55, ease: "easeOut" }}
         />
@@ -87,7 +87,7 @@ export default function SystemMonitorCard({ className }: { className?: string })
   return (
     <div
       className={cn(
-        "rounded-2xl border border-white/10 bg-[#090909]/85 p-4 backdrop-blur-xl",
+        "rounded-2xl border border-white/10 bg-[#090909]/90 p-4 backdrop-blur-lg",
         className,
       )}
     >
