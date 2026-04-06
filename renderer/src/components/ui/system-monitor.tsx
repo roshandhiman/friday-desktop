@@ -31,17 +31,17 @@ function MeterRow({
 
   return (
     <div className="space-y-2.5">
-      <div className="flex items-center justify-between text-xs uppercase tracking-[0.14em] text-white/70">
-        <span className="flex items-center gap-2">
+      <div className="flex items-center justify-between text-xs uppercase tracking-[0.16em] text-cyan-300/80">
+        <span className="flex items-center gap-2 text-cyan-200/90">
           {icon}
           {label}
         </span>
-        <span className="text-white/85">{normalized}%</span>
+        <span className="font-semibold text-cyan-100/90">{normalized}%</span>
       </div>
 
-      <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+      <div className="h-2 overflow-hidden rounded-full bg-gradient-to-r from-cyan-950/40 to-blue-950/40 border border-cyan-500/20">
         <motion.div
-          className="h-full rounded-full bg-gradient-to-r from-white/65 to-white shadow-[0_0_12px_rgba(255,255,255,0.6),0_0_6px_rgba(0,217,255,0.3)]"
+          className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-cyan-400 to-blue-400 shadow-[0_0_20px_rgba(0,217,255,0.5),inset_0_0_10px_rgba(255,255,255,0.2)]"
           animate={{ width: `${normalized}%` }}
           transition={{ duration: 0.55, ease: "easeOut" }}
         />
@@ -87,18 +87,18 @@ export default function SystemMonitorCard({ className }: { className?: string })
   return (
     <div
       className={cn(
-        "rounded-2xl border border-white/10 bg-[#090909]/90 p-4 backdrop-blur-lg",
+        "rounded-2xl border border-cyan-500/20 bg-gradient-to-br from-cyan-950/20 to-slate-950/10 p-4 backdrop-blur-sm",
         className,
       )}
     >
-      <h3 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-white/85">
+      <h3 className="mb-4 text-sm font-bold uppercase tracking-[0.2em] text-cyan-300/90">
         System Monitor
       </h3>
 
       <div className="space-y-4">
-        <MeterRow label="CPU" value={stats.cpu} icon={<Cpu className="h-3.5 w-3.5" />} />
-        <MeterRow label="RAM" value={stats.ram} icon={<MemoryStick className="h-3.5 w-3.5" />} />
-        <MeterRow label="GPU" value={stats.gpu} icon={<HardDrive className="h-3.5 w-3.5" />} />
+        <MeterRow label="CPU" value={stats.cpu} icon={<Cpu className="h-3.5 w-3.5 text-cyan-400" />} />
+        <MeterRow label="RAM" value={stats.ram} icon={<MemoryStick className="h-3.5 w-3.5 text-cyan-400" />} />
+        <MeterRow label="GPU" value={stats.gpu} icon={<HardDrive className="h-3.5 w-3.5 text-cyan-400" />} />
       </div>
 
       {/* TODO: Attach backend persistence for historical system metrics */}

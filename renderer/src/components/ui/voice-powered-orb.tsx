@@ -108,12 +108,14 @@ export default function VoicePoweredOrb({ className }: { className?: string }) {
         type="button"
         onClick={() => setMicOn((prev) => !prev)}
         className={cn(
-          "mt-5 grid h-16 w-16 place-items-center rounded-full border border-white/20 bg-[#111111]/90 text-white transition",
-          micOn ? "shadow-[0_0_32px_rgba(255,255,255,0.35),0_0_16px_rgba(0,217,255,0.25)]" : "opacity-70 shadow-[0_0_20px_rgba(0,0,0,0.4)]",
+          "mt-6 grid h-20 w-20 place-items-center rounded-full border-2 bg-gradient-to-br from-cyan-500 to-blue-600 text-white transition-all duration-300",
+          micOn 
+            ? "border-cyan-400/80 shadow-[0_0_40px_rgba(0,217,255,0.5),0_0_80px_rgba(0,217,255,0.25),inset_0_0_20px_rgba(255,255,255,0.2)]" 
+            : "border-cyan-500/30 shadow-[0_0_20px_rgba(0,0,0,0.5)] opacity-70",
         )}
         aria-label={micOn ? "Turn mic off" : "Turn mic on"}
       >
-        {micOn ? <Mic className="h-7 w-7" /> : <MicOff className="h-7 w-7" />}
+        {micOn ? <Mic className="h-8 w-8" /> : <MicOff className="h-8 w-8" />}
       </button>
 
       {/* TODO: Connect AI speaking state from backend */}
