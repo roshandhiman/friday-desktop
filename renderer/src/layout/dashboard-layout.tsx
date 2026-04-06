@@ -48,7 +48,7 @@ export default function DashboardLayout() {
         <div className="relative z-10 flex min-h-[860px]">
           <aside
             className={cn(
-              "sidebar-glass flex h-auto flex-col gap-5 border-r border-white/10 px-3 py-4 transition-all duration-300",
+              "sidebar-glass flex h-auto flex-col gap-5 border-r border-white/10 px-3 py-4 transition-all duration-300 ease-in-out",
               collapsed ? "w-[88px]" : "w-[260px]",
             )}
           >
@@ -95,10 +95,10 @@ export default function DashboardLayout() {
                     key={item.to}
                     to={item.to}
                     className={cn(
-                      "flex items-center rounded-xl px-3 py-3 text-sm transition",
+                      "flex items-center rounded-xl px-3 py-3 text-sm transition-all duration-200",
                       collapsed ? "justify-center" : "gap-3",
                       active
-                        ? "bg-white/14 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.2)]"
+                        ? "bg-white/14 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.2),0_0_16px_rgba(0,217,255,0.2)]"
                         : "text-white/65 hover:bg-white/8 hover:text-white",
                     )}
                   >

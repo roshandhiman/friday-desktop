@@ -26,7 +26,8 @@ export default function DashboardPage() {
   }, []);
 
   return (
-    <div className="grid min-h-[780px] gap-5 xl:grid-cols-[minmax(0,1fr)_372px]">
+    <div className="grid min-h-[780px] gap-5 xl:grid-cols-[1fr_380px]">
+      {/* CENTER: Orb + Greeting */}
       <section className="panel-surface relative flex min-h-[760px] flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#0a0a0a]/90 p-6">
         <BGPattern
           variant="dots"
@@ -36,7 +37,7 @@ export default function DashboardPage() {
           className="opacity-40"
         />
 
-        <div className="relative z-10 mb-4 text-center">
+        <div className="relative z-10 mb-6 text-center">
           <h1 className="text-3xl font-semibold tracking-tight text-white">{greeting}, Roshan</h1>
         </div>
 
@@ -48,6 +49,7 @@ export default function DashboardPage() {
         {/* TODO: Connect voice command execution API */}
       </section>
 
+      {/* RIGHT: Chat + System Monitor */}
       <aside className="panel-surface flex min-h-[760px] flex-col rounded-3xl border border-white/10 bg-[#090909]/92 p-4">
         <div className="rounded-2xl border border-white/10 bg-black/25 p-3">
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-white/85">Today</h2>
