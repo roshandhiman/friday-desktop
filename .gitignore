@@ -1,0 +1,7 @@
+node_modules
+dist
+out
+.env
+.DS_Store
+renderer/node_modules
+renderer/dist
