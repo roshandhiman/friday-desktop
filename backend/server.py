@@ -184,49 +184,72 @@ async def chat_with_gemini(user_message_part: dict) -> dict:
         }
     }
 
-    try:
-        print(f"[Gemini] Sending request to {url.split('?')[0]}...")
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json=payload)
-            print(f"[Gemini] HTTP Status: {resp.status_code}")
-            resp.raise_for_status()
-            data = resp.json()
-            
-            # Parse text response from Gemini
-            candidate = data.get("candidates", [{}])[0]
-            part = candidate.get("content", {}).get("parts", [{}])[0]
-            text_response = part.get("text", "{}")
-            print(f"[Gemini] Raw Model Output: {text_response}")
-            
-            # Parse the JSON response returned by the model
-            res = json.loads(text_response)
-            
-            transcription = res.get("transcription", "").strip()
-            response_text = res.get("response", "").strip()
+    max_retries = 3
+    retry_delay = 2.0  # seconds
 
-            print(f"[Gemini] Parsed - Transcription: '{transcription}' | Response: '{response_text}'")
+    for attempt in range(max_retries):
+        try:
+            print(f"[Gemini] Sending request to {url.split('?')[0]} (Attempt {attempt + 1}/{max_retries})...")
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(url, json=payload)
+                print(f"[Gemini] HTTP Status: {resp.status_code}")
+                
+                if resp.status_code == 429:
+                    if attempt < max_retries - 1:
+                        print(f"[Gemini] Got 429. Retrying in {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        return {
+                            "transcription": "",
+                            "response": "I'm sorry sir, but my Gemini brain is currently receiving too many requests (429 Rate Limit). Please wait a moment and try again."
+                        }
+                
+                resp.raise_for_status()
+                data = resp.json()
+                
+                # Parse text response from Gemini
+                candidate = data.get("candidates", [{}])[0]
+                part = candidate.get("content", {}).get("parts", [{}])[0]
+                text_response = part.get("text", "{}")
+                print(f"[Gemini] Raw Model Output: {text_response}")
+                
+                # Parse the JSON response returned by the model
+                res = json.loads(text_response)
+                
+                transcription = res.get("transcription", "").strip()
+                response_text = res.get("response", "").strip()
 
-            # Update conversation history with text representation of user query
-            user_text = transcription if transcription else user_message_part.get("text", "")
-            if user_text:
-                conversation_history.append({"role": "user", "content": user_text})
-            
-            conversation_history.append({"role": "assistant", "content": response_text})
+                print(f"[Gemini] Parsed - Transcription: '{transcription}' | Response: '{response_text}'")
 
-            # Keep history manageable
-            if len(conversation_history) > MAX_HISTORY:
-                conversation_history = conversation_history[-MAX_HISTORY:]
+                # Update conversation history with text representation of user query
+                user_text = transcription if transcription else user_message_part.get("text", "")
+                if user_text:
+                    conversation_history.append({"role": "user", "content": user_text})
+                
+                conversation_history.append({"role": "assistant", "content": response_text})
 
-            return {"transcription": transcription, "response": response_text}
+                # Keep history manageable
+                if len(conversation_history) > MAX_HISTORY:
+                    conversation_history = conversation_history[-MAX_HISTORY:]
 
-    except Exception as e:
-        print(f"[Gemini] Exception occurred: {e}")
-        if 'resp' in locals():
-            print(f"[Gemini] Response Content: {resp.text}")
-        return {
-            "transcription": "",
-            "response": f"I'm having trouble connecting to my Gemini brain, sir. Error: {str(e)}"
-        }
+                return {"transcription": transcription, "response": response_text}
+
+        except Exception as e:
+            print(f"[Gemini] Exception occurred on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                print(f"[Gemini] Retrying in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+                continue
+            else:
+                if 'resp' in locals():
+                    print(f"[Gemini] Response Content: {resp.text}")
+                return {
+                    "transcription": "",
+                    "response": f"I'm having trouble connecting to my Gemini brain, sir. Error: {str(e)}"
+                }
 
 
 # ── Action Parser ────────────────────────────────────────────────────────────
