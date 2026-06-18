@@ -52,6 +52,8 @@ ACTION FORMAT (include at END of your response when needed):
 [ACTION:SCREENSHOT]
 [ACTION:SYSTEM_INFO]
 [ACTION:SEND_WHATSAPP:ContactNameOrPhone|MessageText]
+[ACTION:SEARCH_YOUTUBE:search query here]
+[ACTION:SEARCH_GOOGLE:search query here]
 
 EXAMPLES:
 - User: "Open YouTube" → "Opening YouTube for you, sir. [ACTION:OPEN_URL:https://www.youtube.com]"
@@ -60,6 +62,8 @@ EXAMPLES:
 - User: "Open my projects folder in VS Code" → "Opening your projects folder in VS Code, sir. [ACTION:OPEN_VSCODE:~/projects]"
 - User: "Take a screenshot" → "Taking a screenshot now, sir. [ACTION:SCREENSHOT]"
 - User: "send message on whatsapp to Bujj saying hi i am friday" → "Sending message to Bujj on WhatsApp, sir. [ACTION:SEND_WHATSAPP:Bujj|hi i am friday]"
+- User: "open sourav joshi vlogs on youtube" → "Searching for Sourav Joshi Vlogs on YouTube now, sir. [ACTION:SEARCH_YOUTUBE:Sourav Joshi Vlogs]"
+- User: "search for the weather in new york on google" → "Searching Google for the weather in New York, sir. [ACTION:SEARCH_GOOGLE:weather in new york]"
 
 Be smart. Be fast. Never say no. Always help."""
 
@@ -164,92 +168,90 @@ async def chat_with_gemini(user_message_part: dict) -> dict:
     # Append the new user turn
     contents.append(user_turn)
 
-    # Prepare request payload
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": contents,
-        "systemInstruction": {
-            "parts": [{"text": SYSTEM_PROMPT}]
-        },
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "transcription": {"type": "STRING"},
-                    "response": {"type": "STRING"}
-                },
-                "required": ["transcription", "response"]
+    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    max_retries_per_model = 2
+    last_error = "No models tried"
+
+    for model in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": contents,
+            "systemInstruction": {
+                "parts": [{"text": SYSTEM_PROMPT}]
+            },
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "transcription": {"type": "STRING"},
+                        "response": {"type": "STRING"}
+                    },
+                    "required": ["transcription", "response"]
+                }
             }
         }
+
+        retry_delay = 1.5
+        for attempt in range(max_retries_per_model):
+            try:
+                print(f"[Gemini] Trying {model} (Attempt {attempt + 1}/{max_retries_per_model})...")
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(url, json=payload)
+                    print(f"[Gemini] {model} HTTP Status: {resp.status_code}")
+                    
+                    if resp.status_code == 429:
+                        last_error = f"{model} returned 429 Rate Limit"
+                        if attempt < max_retries_per_model - 1:
+                            print(f"[Gemini] Got 429. Retrying {model} in {retry_delay}s...")
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= 2
+                            continue
+                        else:
+                            print(f"[Gemini] {model} rate limited. Swapping to fallback model...")
+                            break  # Break out of attempt loop to try next model
+                    
+                    resp.raise_for_status()
+                    data = resp.json()
+                    
+                    # Parse response
+                    candidate = data.get("candidates", [{}])[0]
+                    part = candidate.get("content", {}).get("parts", [{}])[0]
+                    text_response = part.get("text", "{}")
+                    print(f"[Gemini] Raw Model Output: {text_response}")
+                    
+                    res = json.loads(text_response)
+                    transcription = res.get("transcription", "").strip()
+                    response_text = res.get("response", "").strip()
+
+                    print(f"[Gemini] Success using {model}!")
+                    
+                    # Update history
+                    user_text = transcription if transcription else user_message_part.get("text", "")
+                    if user_text:
+                        conversation_history.append({"role": "user", "content": user_text})
+                    conversation_history.append({"role": "assistant", "content": response_text})
+
+                    if len(conversation_history) > MAX_HISTORY:
+                        conversation_history = conversation_history[-MAX_HISTORY:]
+
+                    return {"transcription": transcription, "response": response_text}
+
+            except Exception as e:
+                last_error = f"{model} error: {str(e)}"
+                print(f"[Gemini] Exception on {model} attempt {attempt + 1}: {e}")
+                if attempt < max_retries_per_model - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    break  # Break out to try next model
+
+    # If we get here, all models failed
+    return {
+        "transcription": "",
+        "response": f"I'm sorry sir, I am currently facing rate limits on all my Gemini brain models. ({last_error}). Please try again shortly."
     }
-
-    max_retries = 3
-    retry_delay = 2.0  # seconds
-
-    for attempt in range(max_retries):
-        try:
-            print(f"[Gemini] Sending request to {url.split('?')[0]} (Attempt {attempt + 1}/{max_retries})...")
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(url, json=payload)
-                print(f"[Gemini] HTTP Status: {resp.status_code}")
-                
-                if resp.status_code == 429:
-                    if attempt < max_retries - 1:
-                        print(f"[Gemini] Got 429. Retrying in {retry_delay}s...")
-                        await asyncio.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
-                        continue
-                    else:
-                        return {
-                            "transcription": "",
-                            "response": "I'm sorry sir, but my Gemini brain is currently receiving too many requests (429 Rate Limit). Please wait a moment and try again."
-                        }
-                
-                resp.raise_for_status()
-                data = resp.json()
-                
-                # Parse text response from Gemini
-                candidate = data.get("candidates", [{}])[0]
-                part = candidate.get("content", {}).get("parts", [{}])[0]
-                text_response = part.get("text", "{}")
-                print(f"[Gemini] Raw Model Output: {text_response}")
-                
-                # Parse the JSON response returned by the model
-                res = json.loads(text_response)
-                
-                transcription = res.get("transcription", "").strip()
-                response_text = res.get("response", "").strip()
-
-                print(f"[Gemini] Parsed - Transcription: '{transcription}' | Response: '{response_text}'")
-
-                # Update conversation history with text representation of user query
-                user_text = transcription if transcription else user_message_part.get("text", "")
-                if user_text:
-                    conversation_history.append({"role": "user", "content": user_text})
-                
-                conversation_history.append({"role": "assistant", "content": response_text})
-
-                # Keep history manageable
-                if len(conversation_history) > MAX_HISTORY:
-                    conversation_history = conversation_history[-MAX_HISTORY:]
-
-                return {"transcription": transcription, "response": response_text}
-
-        except Exception as e:
-            print(f"[Gemini] Exception occurred on attempt {attempt + 1}: {e}")
-            if attempt < max_retries - 1:
-                print(f"[Gemini] Retrying in {retry_delay}s...")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
-                continue
-            else:
-                if 'resp' in locals():
-                    print(f"[Gemini] Response Content: {resp.text}")
-                return {
-                    "transcription": "",
-                    "response": f"I'm having trouble connecting to my Gemini brain, sir. Error: {str(e)}"
-                }
 
 
 # ── Action Parser ────────────────────────────────────────────────────────────

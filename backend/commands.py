@@ -282,6 +282,21 @@ def send_whatsapp_message(contact: str, message: str) -> dict:
     except Exception as e:
         return {"success": False, "message": f"Failed to send deep link: {str(e)}"}
 
+def search_youtube(query: str) -> dict:
+    """Search YouTube for a query."""
+    import urllib.parse
+    encoded = urllib.parse.quote(query)
+    url = f"https://www.youtube.com/results?search_query={encoded}"
+    return open_url(url)
+
+
+def search_google(query: str) -> dict:
+    """Search Google for a query."""
+    import urllib.parse
+    encoded = urllib.parse.quote(query)
+    url = f"https://www.google.com/search?q={encoded}"
+    return open_url(url)
+
 
 def execute_action(action: str, params: str) -> dict:
     """Execute an action based on AI response parsing."""
@@ -305,5 +320,9 @@ def execute_action(action: str, params: str) -> dict:
             return send_whatsapp_message(contact.strip(), message.strip())
         else:
             return {"success": False, "message": "Invalid WhatsApp params"}
+    elif action == "SEARCH_YOUTUBE":
+        return search_youtube(params)
+    elif action == "SEARCH_GOOGLE":
+        return search_google(params)
     else:
         return {"success": False, "message": f"Unknown action: {action}"}
