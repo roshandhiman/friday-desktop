@@ -1,8 +1,8 @@
 """
 Friday AI — Main Backend Server
 FastAPI + WebSocket server that handles:
-- Voice input (Google Gemini API audio transcription & understanding)
-- AI responses (Google Gemini API with function actions)
+- Voice input (Groq Whisper API transcription)
+- AI responses (Groq Llama 3 API chat completions)
 - Text-to-speech (pyttsx3)
 - Command execution
 """
@@ -29,7 +29,7 @@ load_dotenv()
 
 # ── Globals ──────────────────────────────────────────────────────────────────
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # pyttsx3 engine (runs in its own thread)
 tts_engine = None
@@ -65,6 +65,8 @@ EXAMPLES:
 - User: "open sourav joshi vlogs on youtube" → "Searching for Sourav Joshi Vlogs on YouTube now, sir. [ACTION:SEARCH_YOUTUBE:Sourav Joshi Vlogs]"
 - User: "search for the weather in new york on google" → "Searching Google for the weather in New York, sir. [ACTION:SEARCH_GOOGLE:weather in new york]"
 
+Format your output as a JSON object with a single key "response".
+
 Be smart. Be fast. Never say no. Always help."""
 
 # Conversation history (in-memory)
@@ -81,7 +83,6 @@ def init_tts():
         tts_engine = pyttsx3.init()
         # Set voice properties
         voices = tts_engine.getProperty("voices")
-        # Try to find a good English voice
         for voice in voices:
             if "english" in voice.name.lower() or "samantha" in voice.name.lower():
                 tts_engine.setProperty("voice", voice.id)
@@ -112,7 +113,6 @@ def speak(text: str):
             tts_engine.runAndWait()
         except Exception as e:
             print(f"[TTS] Error: {e}")
-            # Try to reinitialize
             try:
                 tts_engine = pyttsx3.init()
             except Exception:
@@ -126,132 +126,131 @@ def speak_async(text: str):
     return thread
 
 
-# ── Gemini API ───────────────────────────────────────────────────────────────
+# ── Groq API ─────────────────────────────────────────────────────────────────
 
-async def chat_with_gemini(user_message_part: dict) -> dict:
-    """
-    Send conversation history and optional audio to Gemini API.
-    user_message_part is a part dictionary.
-    Returns a dict with {"transcription": "...", "response": "..."}
-    """
-    global conversation_history
+async def transcribe_audio_with_groq(audio_bytes: bytes) -> str:
+    """Transcribe audio WAV bytes using Groq's Whisper API."""
+    if not GROQ_API_KEY:
+        print("[Groq] Whisper Error: GROQ_API_KEY is not set.")
+        return ""
 
-    if not GEMINI_API_KEY:
-        print("[Gemini] Error: GEMINI_API_KEY is not set.")
-        return {
-            "transcription": "",
-            "response": "Gemini API Key is not set, sir. Please configure it in the .env file."
-        }
-
-    # Format current user turn
-    user_turn = {
-        "role": "user",
-        "parts": [user_message_part]
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}"
     }
     
-    # If the user message part is audio, we also add an instruction text part to guide transcription and response.
-    if "inlineData" in user_message_part:
-        user_turn["parts"].append({
-            "text": "Transcribe the audio exactly in 'transcription' and respond to it in 'response' following the system rules."
-        })
+    files = {
+        "file": ("audio.wav", audio_bytes, "audio/wav")
+    }
+    data = {
+        "model": "whisper-large-v3-turbo",
+        "response_format": "json"
+    }
 
-    # Prepare contents history
-    contents = []
-    # Add history (mapping roles user->user, assistant->model)
-    for msg in conversation_history:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append({
-            "role": role,
-            "parts": [{"text": msg["content"]}]
-        })
-    
-    # Append the new user turn
-    contents.append(user_turn)
-
-    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
-    max_retries_per_model = 2
-    last_error = "No models tried"
-
-    for model in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": contents,
-            "systemInstruction": {
-                "parts": [{"text": SYSTEM_PROMPT}]
-            },
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "transcription": {"type": "STRING"},
-                        "response": {"type": "STRING"}
-                    },
-                    "required": ["transcription", "response"]
-                }
-            }
-        }
-
-        retry_delay = 1.5
-        for attempt in range(max_retries_per_model):
-            try:
-                print(f"[Gemini] Trying {model} (Attempt {attempt + 1}/{max_retries_per_model})...")
-                async with httpx.AsyncClient(timeout=60) as client:
-                    resp = await client.post(url, json=payload)
-                    print(f"[Gemini] {model} HTTP Status: {resp.status_code}")
-                    
-                    if resp.status_code == 429:
-                        last_error = f"{model} returned 429 Rate Limit"
-                        if attempt < max_retries_per_model - 1:
-                            print(f"[Gemini] Got 429. Retrying {model} in {retry_delay}s...")
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= 2
-                            continue
-                        else:
-                            print(f"[Gemini] {model} rate limited. Swapping to fallback model...")
-                            break  # Break out of attempt loop to try next model
-                    
-                    resp.raise_for_status()
-                    data = resp.json()
-                    
-                    # Parse response
-                    candidate = data.get("candidates", [{}])[0]
-                    part = candidate.get("content", {}).get("parts", [{}])[0]
-                    text_response = part.get("text", "{}")
-                    print(f"[Gemini] Raw Model Output: {text_response}")
-                    
-                    res = json.loads(text_response)
-                    transcription = res.get("transcription", "").strip()
-                    response_text = res.get("response", "").strip()
-
-                    print(f"[Gemini] Success using {model}!")
-                    
-                    # Update history
-                    user_text = transcription if transcription else user_message_part.get("text", "")
-                    if user_text:
-                        conversation_history.append({"role": "user", "content": user_text})
-                    conversation_history.append({"role": "assistant", "content": response_text})
-
-                    if len(conversation_history) > MAX_HISTORY:
-                        conversation_history = conversation_history[-MAX_HISTORY:]
-
-                    return {"transcription": transcription, "response": response_text}
-
-            except Exception as e:
-                last_error = f"{model} error: {str(e)}"
-                print(f"[Gemini] Exception on {model} attempt {attempt + 1}: {e}")
-                if attempt < max_retries_per_model - 1:
+    max_retries = 3
+    retry_delay = 1.0
+    for attempt in range(max_retries):
+        try:
+            print(f"[Groq] Sending transcription request (Attempt {attempt + 1}/{max_retries})...")
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(url, headers=headers, files=files, data=data)
+                print(f"[Groq] Whisper Status: {resp.status_code}")
+                
+                if resp.status_code == 429:
+                    print(f"[Groq] Whisper rate limit. Retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2
                     continue
-                else:
-                    break  # Break out to try next model
+                
+                resp.raise_for_status()
+                res_data = resp.json()
+                text = res_data.get("text", "").strip()
+                print(f"[Groq] Transcription: '{text}'")
+                return text
+                
+        except Exception as e:
+            print(f"[Groq] Whisper exception on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+                continue
+            else:
+                return ""
 
-    # If we get here, all models failed
-    return {
-        "transcription": "",
-        "response": f"I'm sorry sir, I am currently facing rate limits on all my Gemini brain models. ({last_error}). Please try again shortly."
+
+async def chat_with_groq(user_message: str) -> dict:
+    """Send conversation history and text query to Groq API using Llama 3."""
+    global conversation_history
+
+    if not GROQ_API_KEY:
+        return {
+            "response": "Groq API Key is not set, sir. Please configure it in the .env file."
+        }
+
+    # Format current user message
+    conversation_history.append({"role": "user", "content": user_message})
+
+    # Keep history manageable
+    if len(conversation_history) > MAX_HISTORY:
+        conversation_history = conversation_history[-MAX_HISTORY:]
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n\nCRITICAL: Return ONLY a valid JSON object matching the requested schema. Do not output any thinking or markdown outside the JSON."}] + conversation_history
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
     }
+    
+    payload = {
+        "model": "llama-3.3-70b-specdec",  # Ultra-fast 70B model
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+        "temperature": 0.5
+    }
+
+    max_retries = 3
+    retry_delay = 1.5
+    for attempt in range(max_retries):
+        try:
+            print(f"[Groq] Sending chat completions request (Attempt {attempt + 1}/{max_retries})...")
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                print(f"[Groq] Status: {resp.status_code}")
+                
+                if resp.status_code == 429:
+                    print(f"[Groq] Rate limit hit. Retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                
+                resp.raise_for_status()
+                data = resp.json()
+                
+                # Extract response
+                ai_message_raw = data["choices"][0]["message"]["content"]
+                print(f"[Groq] Raw Model Output: {ai_message_raw}")
+                
+                try:
+                    res = json.loads(ai_message_raw)
+                    response_text = res.get("response", ai_message_raw).strip()
+                except Exception:
+                    response_text = ai_message_raw.strip()
+                
+                # Update history
+                conversation_history.append({"role": "assistant", "content": response_text})
+                return {"response": response_text}
+                
+        except Exception as e:
+            print(f"[Groq] Chat exception on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+                continue
+            else:
+                return {
+                    "response": f"I'm having trouble connecting to my Groq brain, sir. Error: {str(e)}"
+                }
 
 
 # ── Action Parser ────────────────────────────────────────────────────────────
@@ -296,7 +295,7 @@ async def health():
     """Health check endpoint."""
     return {
         "status": "ok",
-        "gemini": bool(GEMINI_API_KEY),
+        "groq": bool(GROQ_API_KEY),
     }
 
 
@@ -318,28 +317,26 @@ async def voice_websocket(ws: WebSocket):
             if msg_type == "audio":
                 # Decode base64 audio
                 import base64
-                audio_base64 = msg["data"]
-                print(f"[WS] Audio data length: {len(audio_base64)} chars")
+                audio_bytes = base64.b64decode(msg["data"])
+                print(f"[WS] Audio bytes length: {len(audio_bytes)}")
 
-                await ws.send_json({"type": "status", "message": "Thinking..."})
+                await ws.send_json({"type": "status", "message": "Transcribing..."})
 
-                # Send base64 audio to Gemini for audio transcription and understanding
-                result = await chat_with_gemini({
-                    "inlineData": {
-                        "mimeType": "audio/wav",
-                        "data": audio_base64
-                    }
-                })
+                # 1. Transcribe with Groq Whisper
+                transcription = await transcribe_audio_with_groq(audio_bytes)
 
-                transcription = result.get("transcription", "")
-                ai_response = result.get("response", "")
+                if not transcription:
+                    print("[WS] Transcription empty or failed.")
+                    await ws.send_json({"type": "error", "message": "Couldn't hear anything. Try again."})
+                    continue
 
                 # Send transcription back
-                if transcription:
-                    print(f"[WS] Sending transcription: '{transcription}'")
-                    await ws.send_json({"type": "transcription", "text": transcription})
-                else:
-                    print("[WS] No transcription found in Gemini response.")
+                await ws.send_json({"type": "transcription", "text": transcription})
+
+                # 2. Get Llama 3 response
+                await ws.send_json({"type": "status", "message": "Thinking..."})
+                result = await chat_with_groq(transcription)
+                ai_response = result.get("response", "")
 
                 # Parse and execute actions
                 actions = parse_and_execute_actions(ai_response)
@@ -372,7 +369,7 @@ async def voice_websocket(ws: WebSocket):
                 await ws.send_json({"type": "transcription", "text": text})
                 await ws.send_json({"type": "status", "message": "Thinking..."})
 
-                result = await chat_with_gemini({"text": text})
+                result = await chat_with_groq(text)
                 ai_response = result.get("response", "")
                 actions = parse_and_execute_actions(ai_response)
 
