@@ -2,10 +2,9 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { VoicePoweredOrb } from "@/components/ui/voice-powered-orb";
-import { Button } from "@/components/ui/button";
 import { Mic, MicOff, Send } from "lucide-react";
 
-// Extend Window for our preload APIs
+// Extend Window for preload APIs
 declare global {
   interface Window {
     fridayAPI?: {
@@ -23,29 +22,229 @@ interface ChatMessage {
 
 const WS_URL = "ws://127.0.0.1:8765/ws/voice";
 
+// Voice Activity Detection config
+const SILENCE_THRESHOLD = 0.015;    // Volume level below this = silence
+const SILENCE_DURATION_MS = 1800;   // ms of silence before auto-send
+const MIN_SPEECH_DURATION_MS = 400; // Minimum speech duration to be valid
+
 export default function App() {
-  const [isRecording, setIsRecording] = useState(false);
+  const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
-  const [statusText, setStatusText] = useState("Click mic to start");
+  const [statusText, setStatusText] = useState("Starting up...");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [textInput, setTextInput] = useState("");
+  const [isMuted, setIsMuted] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const audioSamplesRef = useRef<number[]>([]);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
-  const lastToggleTimeRef = useRef<number>(0);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speechStartRef = useRef<number>(0);
+  const hasSpeechRef = useRef(false);
+  const vadIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isListeningRef = useRef(false);
 
   // Auto-scroll messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Connect WebSocket
+  // ── Cleanup mic resources ──
+  const cleanupMic = useCallback(() => {
+    if (vadIntervalRef.current) {
+      clearInterval(vadIntervalRef.current);
+      vadIntervalRef.current = null;
+    }
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current) {
+      try {
+        if (mediaRecorderRef.current.state !== "inactive") {
+          mediaRecorderRef.current.stop();
+        }
+      } catch (e) { /* ignore */ }
+      mediaRecorderRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => {
+        try { t.stop(); } catch (e) { /* ignore */ }
+      });
+      streamRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      try { audioCtxRef.current.close(); } catch (e) { /* ignore */ }
+      audioCtxRef.current = null;
+    }
+    analyserRef.current = null;
+    audioChunksRef.current = [];
+    hasSpeechRef.current = false;
+    isListeningRef.current = false;
+  }, []);
+
+  // ── Send audio to backend ──
+  const sendAudioToBackend = useCallback(async (audioBlob: Blob) => {
+    if (audioBlob.size < 500) {
+      console.log("[Audio] Blob too small, ignoring");
+      return;
+    }
+
+    const base64 = await blobToBase64(audioBlob);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "audio",
+          data: base64,
+          mimeType: audioBlob.type,
+        })
+      );
+      setIsProcessing(true);
+      setStatusText("Transcribing...");
+    }
+  }, []);
+
+  // ── Start listening (always-on mic with VAD) ──
+  const startListening = useCallback(async () => {
+    if (isListeningRef.current || isMuted) return;
+
+    try {
+      cleanupMic();
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      streamRef.current = stream;
+
+      // Set up audio analysis for VAD (Voice Activity Detection)
+      const audioCtx = new AudioContext();
+      audioCtxRef.current = audioCtx;
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.3;
+      source.connect(analyser);
+      // DO NOT connect to destination — prevents feedback and crashes
+      analyserRef.current = analyser;
+
+      // Set up MediaRecorder
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : "";
+
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      hasSpeechRef.current = false;
+      speechStartRef.current = 0;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        const chunks = [...audioChunksRef.current];
+        audioChunksRef.current = [];
+
+        if (chunks.length === 0 || !hasSpeechRef.current) {
+          return;
+        }
+
+        const audioBlob = new Blob(chunks, {
+          type: recorder.mimeType || "audio/webm",
+        });
+
+        console.log(`[Audio] Sending ${audioBlob.size} bytes`);
+        await sendAudioToBackend(audioBlob);
+      };
+
+      recorder.start(200); // Collect data every 200ms
+
+      // ── Voice Activity Detection loop ──
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      vadIntervalRef.current = setInterval(() => {
+        if (!analyserRef.current) return;
+        analyserRef.current.getByteFrequencyData(dataArray);
+
+        // Calculate RMS volume level
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const v = dataArray[i] / 255;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / dataArray.length);
+
+        if (rms > SILENCE_THRESHOLD) {
+          // Voice detected!
+          if (!hasSpeechRef.current) {
+            hasSpeechRef.current = true;
+            speechStartRef.current = Date.now();
+            console.log("[VAD] Speech started");
+          }
+
+          // Reset silence timer
+          if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+          }
+        } else if (hasSpeechRef.current) {
+          // Silence after speech — start countdown
+          if (!silenceTimerRef.current) {
+            silenceTimerRef.current = setTimeout(() => {
+              const speechDuration = Date.now() - speechStartRef.current;
+              
+              if (speechDuration >= MIN_SPEECH_DURATION_MS && hasSpeechRef.current) {
+                console.log(`[VAD] Silence detected after ${speechDuration}ms of speech. Sending.`);
+                
+                // Stop recorder (triggers onstop which sends audio)
+                if (mediaRecorderRef.current?.state === "recording") {
+                  mediaRecorderRef.current.stop();
+                }
+
+                // Stop listening while processing
+                if (vadIntervalRef.current) {
+                  clearInterval(vadIntervalRef.current);
+                  vadIntervalRef.current = null;
+                }
+                
+                setIsListening(false);
+                isListeningRef.current = false;
+              }
+              
+              silenceTimerRef.current = null;
+              hasSpeechRef.current = false;
+            }, SILENCE_DURATION_MS);
+          }
+        }
+      }, 80); // Check every 80ms
+
+      setIsListening(true);
+      isListeningRef.current = true;
+      setStatusText("Listening...");
+      console.log("[Audio] Listening started with VAD");
+    } catch (err: any) {
+      console.error("Mic error:", err);
+      setStatusText(`Mic error: ${err.message || String(err)}`);
+      cleanupMic();
+    }
+  }, [isMuted, cleanupMic, sendAudioToBackend]);
+
+  // ── Connect WebSocket ──
   const connectWS = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
@@ -54,8 +253,10 @@ export default function App() {
 
     ws.onopen = () => {
       setIsConnected(true);
-      setStatusText("Connected — Ready to listen");
+      setStatusText("Connected — Ready");
       console.log("[WS] Connected");
+      // Auto-start listening on connect
+      setTimeout(() => startListening(), 500);
     };
 
     ws.onmessage = (event) => {
@@ -75,14 +276,23 @@ export default function App() {
             ...prev,
             { role: "assistant", text: msg.text, timestamp: Date.now() },
           ]);
+          setIsProcessing(false);
           setStatusText("Speaking...");
           break;
 
         case "speaking":
           setIsSpeaking(msg.active);
           if (!msg.active) {
-            setStatusText("Ready to listen");
+            setStatusText("Ready");
           }
+          break;
+
+        case "listening":
+          // Backend says "I'm done, start listening again"
+          setIsProcessing(false);
+          setIsSpeaking(false);
+          // Auto-restart listening
+          setTimeout(() => startListening(), 300);
           break;
 
         case "status":
@@ -90,11 +300,14 @@ export default function App() {
           break;
 
         case "error":
+          setIsProcessing(false);
           setStatusText(`Error: ${msg.message}`);
           setMessages((prev) => [
             ...prev,
             { role: "status", text: `⚠️ ${msg.message}`, timestamp: Date.now() },
           ]);
+          // Resume listening after error
+          setTimeout(() => startListening(), 1000);
           break;
       }
     };
@@ -102,134 +315,41 @@ export default function App() {
     ws.onclose = () => {
       setIsConnected(false);
       setStatusText("Disconnected — Reconnecting...");
-      console.log("[WS] Disconnected");
-      // Auto-reconnect after 3s
+      cleanupMic();
       setTimeout(connectWS, 3000);
     };
 
     ws.onerror = () => {
-      setStatusText("Backend not ready — starting up...");
+      setStatusText("Backend starting up...");
     };
 
     wsRef.current = ws;
-  }, []);
+  }, [startListening, cleanupMic]);
 
   // Connect on mount
   useEffect(() => {
-    // Wait a bit for Python backend to start
     const timer = setTimeout(connectWS, 2000);
     return () => {
       clearTimeout(timer);
+      cleanupMic();
       wsRef.current?.close();
     };
-  }, [connectWS]);
+  }, [connectWS, cleanupMic]);
 
-  // Start/Stop Recording
-  const toggleRecording = useCallback(async () => {
-    const now = Date.now();
-    if (now - lastToggleTimeRef.current < 800) {
-      console.log("[Audio] Toggle recording click debounced");
-      return;
+  // ── Toggle mute ──
+  const toggleMute = useCallback(() => {
+    if (isMuted) {
+      setIsMuted(false);
+      setTimeout(() => startListening(), 200);
+    } else {
+      setIsMuted(true);
+      cleanupMic();
+      setIsListening(false);
+      setStatusText("Muted");
     }
-    lastToggleTimeRef.current = now;
+  }, [isMuted, startListening, cleanupMic]);
 
-    if (isRecording) {
-      // Stop recording
-      setIsRecording(false);
-      setStatusText("Processing audio...");
-
-      try {
-        if (scriptProcessorRef.current) {
-          scriptProcessorRef.current.disconnect();
-          scriptProcessorRef.current.onaudioprocess = null;
-          scriptProcessorRef.current = null;
-        }
-        if (mediaStreamSourceRef.current) {
-          mediaStreamSourceRef.current.disconnect();
-          mediaStreamSourceRef.current = null;
-        }
-        if (audioContextRef.current) {
-          await audioContextRef.current.close();
-          audioContextRef.current = null;
-        }
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
-          streamRef.current = null;
-        }
-
-        const samples = new Float32Array(audioSamplesRef.current);
-        if (samples.length === 0) {
-          setStatusText("No audio captured. Try again.");
-          return;
-        }
-
-        console.log(`[Audio] Captured ${samples.length} samples.`);
-        const wavBuffer = encodeWav(samples, 16000);
-        const wavBlob = new Blob([wavBuffer], { type: "audio/wav" });
-        const base64 = await blobToBase64(wavBlob);
-
-        // Send to backend
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({ type: "audio", data: base64 })
-          );
-          setStatusText("Transcribing...");
-        } else {
-          setStatusText("Not connected to backend");
-          connectWS();
-        }
-      } catch (err: any) {
-        console.error("Stop recording error:", err);
-        setStatusText(`Error processing audio: ${err.message || err.name || String(err)}`);
-      }
-      return;
-    }
-
-    // Start recording
-    try {
-      setStatusText("Requesting microphone access...");
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
-      streamRef.current = stream;
-
-      const audioContext = new AudioContext({ sampleRate: 16000 });
-      audioContextRef.current = audioContext;
-
-      const mediaStreamSource = audioContext.createMediaStreamSource(stream);
-      mediaStreamSourceRef.current = mediaStreamSource;
-
-      // 4096 buffer size, 1 input channel, 1 output channel
-      const scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-      scriptProcessorRef.current = scriptProcessor;
-
-      audioSamplesRef.current = [];
-
-      scriptProcessor.onaudioprocess = (event) => {
-        const inputBuffer = event.inputBuffer;
-        const inputData = inputBuffer.getChannelData(0);
-        for (let i = 0; i < inputData.length; i++) {
-          audioSamplesRef.current.push(inputData[i]);
-        }
-      };
-
-      mediaStreamSource.connect(scriptProcessor);
-      scriptProcessor.connect(audioContext.destination);
-
-      setIsRecording(true);
-      setStatusText("Listening... Click mic to stop");
-    } catch (err: any) {
-      console.error("Mic error:", err);
-      setStatusText(`Microphone error: ${err.message || err.name || String(err)}`);
-    }
-  }, [isRecording, connectWS]);
-
-  // Send text message
+  // ── Send text message ──
   const sendTextMessage = useCallback(() => {
     const text = textInput.trim();
     if (!text) return;
@@ -238,17 +358,34 @@ export default function App() {
       return;
     }
 
+    // Pause listening while processing text
+    cleanupMic();
+    setIsListening(false);
+
     wsRef.current.send(JSON.stringify({ type: "text", data: text }));
     setTextInput("");
+    setIsProcessing(true);
     setStatusText("Thinking...");
-  }, [textInput]);
+  }, [textInput, cleanupMic]);
 
-  // Stop Friday from speaking
-  const stopSpeaking = useCallback(() => {
+  // ── Stop Friday ──
+  const stopFriday = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "stop" }));
     }
   }, []);
+
+  // Determine orb state
+  const orbActive = isListening || isSpeaking || isProcessing;
+
+  // Status indicator color
+  const getStatusColor = () => {
+    if (isProcessing) return "#a78bfa"; // purple
+    if (isSpeaking) return "#fbbf24";   // yellow
+    if (isListening) return "#4ade80";  // green
+    if (isMuted) return "#f87171";      // red
+    return "rgba(255,255,255,0.4)";
+  };
 
   return (
     <div
@@ -286,15 +423,13 @@ export default function App() {
             height: 8,
             borderRadius: "50%",
             background: isConnected ? "#4ade80" : "#f87171",
-            boxShadow: isConnected
-              ? "0 0 8px #4ade80"
-              : "0 0 8px #f87171",
+            boxShadow: isConnected ? "0 0 8px #4ade80" : "0 0 8px #f87171",
           }}
         />
         {isConnected ? "Online" : "Connecting..."}
       </div>
 
-      {/* Chat messages (scrollable area above orb) */}
+      {/* Chat messages */}
       {messages.length > 0 && (
         <div
           style={{
@@ -317,7 +452,10 @@ export default function App() {
                 alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
                 maxWidth: "70%",
                 padding: "0.6rem 1rem",
-                borderRadius: msg.role === "user" ? "1rem 1rem 0.25rem 1rem" : "1rem 1rem 1rem 0.25rem",
+                borderRadius:
+                  msg.role === "user"
+                    ? "1rem 1rem 0.25rem 1rem"
+                    : "1rem 1rem 1rem 0.25rem",
                 background:
                   msg.role === "user"
                     ? "rgba(255,255,255,0.08)"
@@ -346,7 +484,7 @@ export default function App() {
       {/* Orb */}
       <div style={{ width: "24rem", height: "24rem", position: "relative" }}>
         <VoicePoweredOrb
-          enableVoiceControl={isRecording || isSpeaking}
+          enableVoiceControl={orbActive}
           className="rounded-xl overflow-hidden shadow-2xl"
         />
       </div>
@@ -355,17 +493,31 @@ export default function App() {
       <p
         style={{
           marginTop: "1.5rem",
-          color: "rgba(255,255,255,0.4)",
+          color: getStatusColor(),
           fontSize: "0.85rem",
           textAlign: "center",
           minHeight: "1.5em",
           transition: "all 0.3s ease",
+          fontWeight: isListening ? 500 : 400,
         }}
       >
+        {isListening && !isProcessing && (
+          <span
+            style={{
+              display: "inline-block",
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: "#4ade80",
+              marginRight: 6,
+              animation: "pulse 1.5s infinite",
+            }}
+          />
+        )}
         {statusText}
       </p>
 
-      {/* Controls */}
+      {/* Controls row */}
       <div
         style={{
           marginTop: "1rem",
@@ -374,51 +526,51 @@ export default function App() {
           gap: "0.75rem",
         }}
       >
-        {/* Mic button */}
-        <Button
-          onClick={isSpeaking ? stopSpeaking : toggleRecording}
-          variant={isRecording ? "destructive" : "secondary"}
-          size="lg"
-          className="px-8 py-3 border-none transition-all duration-300"
+        {/* Mute toggle button */}
+        <button
+          onClick={toggleMute}
           style={{
-            background: isRecording
-              ? "rgba(239,68,68,0.2)"
-              : isSpeaking
-              ? "rgba(251,191,36,0.2)"
-              : "rgba(255,255,255,0.06)",
-            color: isRecording
-              ? "#f87171"
-              : isSpeaking
-              ? "#fbbf24"
-              : "rgba(255,255,255,0.7)",
-            border: `1px solid ${
-              isRecording
-                ? "rgba(239,68,68,0.3)"
-                : isSpeaking
-                ? "rgba(251,191,36,0.3)"
-                : "rgba(255,255,255,0.08)"
-            }`,
+            padding: "0.7rem 1.5rem",
             borderRadius: "9999px",
+            border: `1px solid ${
+              isMuted ? "rgba(239,68,68,0.3)" : "rgba(255,255,255,0.08)"
+            }`,
+            background: isMuted
+              ? "rgba(239,68,68,0.15)"
+              : "rgba(255,255,255,0.04)",
+            color: isMuted ? "#f87171" : "rgba(255,255,255,0.7)",
             cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            fontSize: "0.85rem",
+            fontFamily: "inherit",
+            transition: "all 0.2s",
           }}
         >
-          {isRecording ? (
-            <>
-              <MicOff className="w-5 h-5 mr-3" />
-              Stop
-            </>
-          ) : isSpeaking ? (
-            <>
-              <MicOff className="w-5 h-5 mr-3" />
-              Stop Friday
-            </>
-          ) : (
-            <>
-              <Mic className="w-5 h-5 mr-3" />
-              Speak
-            </>
-          )}
-        </Button>
+          {isMuted ? <MicOff size={18} /> : <Mic size={18} />}
+          {isMuted ? "Unmute" : "Mute"}
+        </button>
+
+        {/* Stop Friday button (visible when speaking/processing) */}
+        {(isSpeaking || isProcessing) && (
+          <button
+            onClick={stopFriday}
+            style={{
+              padding: "0.7rem 1.5rem",
+              borderRadius: "9999px",
+              border: "1px solid rgba(251,191,36,0.3)",
+              background: "rgba(251,191,36,0.12)",
+              color: "#fbbf24",
+              cursor: "pointer",
+              fontSize: "0.85rem",
+              fontFamily: "inherit",
+              transition: "all 0.2s",
+            }}
+          >
+            Stop Friday
+          </button>
+        )}
       </div>
 
       {/* Text input */}
@@ -447,6 +599,7 @@ export default function App() {
             color: "rgba(255,255,255,0.8)",
             fontSize: "0.85rem",
             outline: "none",
+            fontFamily: "inherit",
             transition: "border-color 0.2s",
           }}
           onFocus={(e) =>
@@ -475,56 +628,28 @@ export default function App() {
           <Send size={16} />
         </button>
       </div>
+
+      {/* Pulse animation CSS */}
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.3; }
+        }
+      `}</style>
     </div>
   );
 }
 
-// ── Helper Functions ──────────────────────────────────────────────────────────
-
-
-function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-
-  // WAV header
-  writeString(view, 0, "RIFF");
-  view.setUint32(4, 36 + samples.length * 2, true);
-  writeString(view, 8, "WAVE");
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true); // chunk size
-  view.setUint16(20, 1, true); // PCM
-  view.setUint16(22, 1, true); // mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // byte rate
-  view.setUint16(32, 2, true); // block align
-  view.setUint16(34, 16, true); // bits per sample
-  writeString(view, 36, "data");
-  view.setUint32(40, samples.length * 2, true);
-
-  // PCM data
-  let offset = 44;
-  for (let i = 0; i < samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    offset += 2;
-  }
-
-  return buffer;
-}
-
-function writeString(view: DataView, offset: number, str: string) {
-  for (let i = 0; i < str.length; i++) {
-    view.setUint8(offset + i, str.charCodeAt(i));
-  }
-}
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => {
       const base64 = (reader.result as string).split(",")[1];
       resolve(base64);
     };
+    reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
 }

@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, systemPreferences, session } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 
@@ -23,7 +23,13 @@ function startPythonBackend() {
   });
 
   pythonProcess.stderr.on("data", (data) => {
-    console.error(`[Python] ${data.toString().trim()}`);
+    // Filter out INFO lines from uvicorn that go to stderr
+    const text = data.toString().trim();
+    if (text.includes("INFO:")) {
+      console.log(text);
+    } else {
+      console.error(`[Python] ${text}`);
+    }
   });
 
   pythonProcess.on("error", (err) => {
@@ -46,6 +52,22 @@ function stopPythonBackend() {
   }
 }
 
+async function requestMicrophonePermission() {
+  // On macOS, explicitly ask the OS for microphone permission
+  if (process.platform === "darwin") {
+    const status = systemPreferences.getMediaAccessStatus("microphone");
+    console.log(`[Permissions] Microphone status: ${status}`);
+
+    if (status !== "granted") {
+      const granted = await systemPreferences.askForMediaAccess("microphone");
+      console.log(`[Permissions] Microphone access granted: ${granted}`);
+      return granted;
+    }
+    return true;
+  }
+  return true;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -61,14 +83,63 @@ function createWindow() {
     },
   });
 
+  // ── Permission handler: auto-grant microphone to our app ──
+  session.defaultSession.setPermissionRequestHandler(
+    (webContents, permission, callback) => {
+      const allowedPermissions = ["media", "mediaKeySystem", "microphone"];
+      if (allowedPermissions.includes(permission)) {
+        console.log(`[Permissions] Granting '${permission}' to renderer`);
+        callback(true);
+      } else {
+        console.log(`[Permissions] Denying '${permission}' to renderer`);
+        callback(false);
+      }
+    }
+  );
+
+  // Also handle permission check requests (Electron 20+)
+  session.defaultSession.setPermissionCheckHandler(
+    (webContents, permission, requestingOrigin) => {
+      const allowedPermissions = ["media", "mediaKeySystem", "microphone"];
+      if (allowedPermissions.includes(permission)) {
+        return true;
+      }
+      return false;
+    }
+  );
+
   mainWindow.loadURL("http://127.0.0.1:5173");
+
+  // ── Crash recovery ──
+  mainWindow.webContents.on("crashed", (event, killed) => {
+    console.error(`[Electron] Renderer crashed (killed: ${killed}). Reloading...`);
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.reload();
+      }
+    }, 1500);
+  });
+
+  mainWindow.webContents.on("render-process-gone", (event, details) => {
+    console.error(`[Electron] Render process gone: ${details.reason}`);
+    if (details.reason !== "clean-exit") {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.reload();
+        }
+      }, 1500);
+    }
+  });
 
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Request mic permission BEFORE creating the window
+  await requestMicrophonePermission();
+
   startPythonBackend();
   createWindow();
 });

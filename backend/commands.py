@@ -298,6 +298,41 @@ def search_google(query: str) -> dict:
     return open_url(url)
 
 
+def create_file(params: str) -> dict:
+    """Create a file on disk. params format: path|content"""
+    if "|" not in params:
+        return {"success": False, "message": "Invalid CREATE_FILE format. Expected path|content"}
+
+    path, content = params.split("|", 1)
+    path = path.strip()
+    expanded = os.path.expanduser(path)
+
+    try:
+        # Create parent directories if needed
+        parent_dir = os.path.dirname(expanded)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+
+        with open(expanded, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        return {"success": True, "message": f"File created at {expanded}", "path": expanded}
+    except Exception as e:
+        return {"success": False, "message": f"Failed to create file: {str(e)}"}
+
+
+def open_file(path: str) -> dict:
+    """Open a file with the default macOS application."""
+    expanded = os.path.expanduser(path.strip())
+    if not os.path.exists(expanded):
+        return {"success": False, "message": f"File not found: {expanded}"}
+    try:
+        subprocess.Popen(["open", expanded], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {"success": True, "message": f"Opened {expanded}"}
+    except Exception as e:
+        return {"success": False, "message": f"Failed to open file: {str(e)}"}
+
+
 def execute_action(action: str, params: str) -> dict:
     """Execute an action based on AI response parsing."""
     action = action.upper().strip()
@@ -324,5 +359,10 @@ def execute_action(action: str, params: str) -> dict:
         return search_youtube(params)
     elif action == "SEARCH_GOOGLE":
         return search_google(params)
+    elif action == "CREATE_FILE":
+        return create_file(params)
+    elif action == "OPEN_FILE":
+        return open_file(params)
     else:
         return {"success": False, "message": f"Unknown action: {action}"}
+
