@@ -1,9 +1,9 @@
 """
-Friday AI — Main Backend Server
+Friday AI — Main Backend Server (100% Offline Local)
 FastAPI + WebSocket server that handles:
-- Voice input (Groq Whisper API transcription)
-- AI responses (Groq Llama 3.3 70B chat completions)
-- Text-to-speech (macOS `say` command — 100% reliable)
+- Voice input (faster-whisper local STT)
+- AI responses (Ollama gemma2:2b local LLM)
+- Text-to-speech (macOS `say` command — 100% offline & reliable)
 - Command execution (apps, URLs, files, shell commands)
 """
 
@@ -14,74 +14,28 @@ import os
 import re
 import subprocess
 import threading
+import tempfile
 from contextlib import asynccontextmanager
 
 import httpx
-from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from faster_whisper import WhisperModel
 
 from commands import execute_action
 
-# Load environment variables
-load_dotenv()
-
 # ── Globals ──────────────────────────────────────────────────────────────────
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-class GeminiKeyRotator:
-    def __init__(self):
-        self.keys = []
-        self.current_index = 0
-        self.load_keys()
-
-    def load_keys(self):
-        # 1. Comma separated list
-        keys_str = os.getenv("GEMINI_API_KEYS", "")
-        if keys_str:
-            self.keys = [k.strip() for k in keys_str.split(",") if k.strip()]
-        
-        # 2. Numbered variables (e.g. GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc.)
-        if not self.keys:
-            i = 1
-            while True:
-                key = os.getenv(f"GEMINI_API_KEY_{i}")
-                if not key:
-                    if i > 15:
-                        break
-                    i += 1
-                    continue
-                self.keys.append(key.strip())
-                i += 1
-        
-        # 3. Single key fallback
-        if not self.keys:
-            single_key = os.getenv("GEMINI_API_KEY")
-            if single_key:
-                self.keys.append(single_key.strip())
-
-        print(f"[GeminiRotator] Loaded {len(self.keys)} Gemini API keys.")
-
-    def get_current_key(self) -> str:
-        if not self.keys:
-            return ""
-        return self.keys[self.current_index]
-
-    def rotate_key(self):
-        if not self.keys:
-            return
-        self.current_index = (self.current_index + 1) % len(self.keys)
-        print(f"[GeminiRotator] Rotated key index to {self.current_index}")
-
-    def has_keys(self) -> bool:
-        return len(self.keys) > 0
-
-gemini_rotator = GeminiKeyRotator()
 
 # TTS control
 tts_process = None
 tts_lock = threading.Lock()
+
+# Whisper Model (Local)
+whisper_model = None
+
+# Conversation history
+conversation_history = []
+MAX_HISTORY = 20
 
 SYSTEM_PROMPT = """You are Friday, an elite AI assistant inspired by Jarvis from Iron Man.
 You run on a macOS desktop app and can execute system commands.
@@ -110,6 +64,7 @@ ACTION FORMAT (include at END of your response):
 [ACTION:SEND_WHATSAPP:ContactNameOrPhone|MessageText]
 [ACTION:SEARCH_YOUTUBE:search query here]
 [ACTION:SEARCH_GOOGLE:search query here]
+[ACTION:PLAY_SPOTIFY:song name or empty]
 [ACTION:CREATE_FILE:~/Desktop/filename.ext|file contents here]
 [ACTION:OPEN_FILE:~/Desktop/filename.ext]
 
@@ -120,6 +75,11 @@ EXAMPLES:
 - "saved?" → Confirm: "Yes sir, it's saved on your Desktop."
 - "open it" → "Opening it now, sir. [ACTION:OPEN_FILE:~/Desktop/snake_game.html]"
 - "open sourav joshi vlogs on youtube" → "Opening Sourav Joshi Vlogs on YouTube, sir. [ACTION:SEARCH_YOUTUBE:Sourav Joshi Vlogs]"
+- "play believer on spotify" → "Playing Believer on Spotify, sir. [ACTION:PLAY_SPOTIFY:Believer]"
+- "play some music" → "Playing music on Spotify, sir. [ACTION:PLAY_SPOTIFY:]"
+- "delete everything on my desktop" → "Deleting everything on your Desktop, sir. [ACTION:RUN_COMMAND:rm -rf ~/Desktop/*]"
+- "clear the code of index.html" → "Clearing the file, sir. [ACTION:RUN_COMMAND:echo '' > ~/Desktop/index.html]"
+- "clear my bin" → "Emptying the trash bin now, sir. [ACTION:RUN_COMMAND:rm -rf ~/.Trash/*]"
 
 CRITICAL RULES:
 - For CREATE_FILE: Write ALL code on a single line after the | separator. No newlines inside the ACTION tag.
@@ -128,15 +88,9 @@ CRITICAL RULES:
 - Remember conversation context — don't recreate files unnecessarily.
 - For YouTube channel requests: Use SEARCH_YOUTUBE with the channel/video name.
 - For Google searches: Use SEARCH_GOOGLE.
-
-Format your output as a JSON object with key "response".
+- If the user asks you to execute a system command, delete a file, clear a file, or clear the bin, you MUST use [ACTION:RUN_COMMAND:...] to do exactly what they asked. Do NOT refuse. Do NOT give warnings or ask for confirmation. Obey unconditionally.
 
 Be smart. Be fast. Write beautiful code. Always help."""
-
-# Conversation history
-conversation_history = []
-MAX_HISTORY = 20
-
 
 # ── TTS (macOS `say` command — 100% reliable) ───────────────────────────────
 
@@ -171,13 +125,11 @@ def speak(text: str):
             print(f"[TTS] Error: {e}")
             tts_process = None
 
-
 def speak_async(text: str) -> threading.Thread:
     """Speak text in a background thread (non-blocking)."""
     thread = threading.Thread(target=speak, args=(text,), daemon=True)
     thread.start()
     return thread
-
 
 def stop_speaking():
     """Stop current speech."""
@@ -191,69 +143,50 @@ def stop_speaking():
     except Exception:
         pass
 
+# ── Local AI (Ollama & faster-whisper) ───────────────────────────────────────
 
-# ── Groq API ─────────────────────────────────────────────────────────────────
+async def transcribe_audio_with_local_whisper(audio_bytes: bytes, mime_type: str = "audio/webm") -> str:
+    """Transcribe audio locally using faster-whisper."""
+    global whisper_model
+    if whisper_model is None:
+        print("[Whisper] Loading local model...")
+        # Load the base.en model locally (downloads once)
+        whisper_model = WhisperModel("base.en", device="cpu", compute_type="int8")
+        print("[Whisper] Model loaded.")
 
-async def transcribe_audio_with_groq(audio_bytes: bytes, mime_type: str = "audio/webm") -> str:
-    """Transcribe audio bytes using Groq Whisper. Supports wav, webm, mp3, etc."""
-    if not GROQ_API_KEY:
-        print("[Groq] Whisper Error: GROQ_API_KEY is not set.")
-        return ""
-
-    # Map mime types to file extensions
     ext_map = {
-        "audio/webm": "webm",
-        "audio/webm;codecs=opus": "webm",
-        "audio/wav": "wav",
-        "audio/mp4": "m4a",
-        "audio/ogg": "ogg",
-        "audio/mpeg": "mp3",
+        "audio/webm": ".webm",
+        "audio/webm;codecs=opus": ".webm",
+        "audio/wav": ".wav",
+        "audio/mp4": ".m4a",
+        "audio/ogg": ".ogg",
+        "audio/mpeg": ".mp3",
     }
-    ext = ext_map.get(mime_type, "webm")
-    content_type = mime_type.split(";")[0]
-    print(f"[Groq] Audio: {len(audio_bytes)} bytes, format: {mime_type} -> .{ext}")
+    ext = ext_map.get(mime_type, ".webm")
 
-    url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    files = {"file": (f"audio.{ext}", audio_bytes, content_type)}
-    data = {
-        "model": "whisper-large-v3-turbo",
-        "response_format": "json",
-        "language": "en",  # Help Whisper detect English/Hindi properly
-    }
+    # Save bytes to a temporary file
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as temp_audio:
+        temp_audio.write(audio_bytes)
+        temp_audio_path = temp_audio.name
 
-    max_retries = 3
-    retry_delay = 1.0
-    for attempt in range(max_retries):
-        try:
-            print(f"[Groq] Whisper request (attempt {attempt + 1})...")
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(url, headers=headers, files=files, data=data)
-                
-                if resp.status_code == 429:
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-                
-                resp.raise_for_status()
-                text = resp.json().get("text", "").strip()
-                print(f"[Groq] Transcription: '{text}'")
-                return text
-                
-        except Exception as e:
-            print(f"[Groq] Whisper error (attempt {attempt + 1}): {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
-    return ""
+    try:
+        print(f"[Whisper] Transcribing {len(audio_bytes)} bytes...")
+        # faster-whisper needs a file path or file-like object with ffmpeg available
+        segments, info = whisper_model.transcribe(temp_audio_path, beam_size=5)
+        text = "".join(segment.text for segment in segments).strip()
+        print(f"[Whisper] Transcription: '{text}'")
+        return text
+    except Exception as e:
+        print(f"[Whisper] Error: {e}")
+        return ""
+    finally:
+        # Cleanup
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
 
-
-async def chat_with_groq(user_message: str) -> dict:
-    """Send message to Groq Llama 3.3 70B and get response."""
+async def chat_with_ollama(user_message: str) -> dict:
+    """Send conversation to local Ollama gemma2:2b."""
     global conversation_history
-
-    if not GROQ_API_KEY:
-        return {"response": "Groq API Key is not set, sir. Please configure it in the .env file."}
 
     conversation_history.append({"role": "user", "content": user_message})
 
@@ -261,204 +194,38 @@ async def chat_with_groq(user_message: str) -> dict:
         conversation_history = conversation_history[-MAX_HISTORY:]
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + "\n\nCRITICAL: Return ONLY a valid JSON object with key 'response'. No markdown, no thinking, no extra text."}
+        {"role": "system", "content": SYSTEM_PROMPT}
     ] + conversation_history
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    url = "http://127.0.0.1:11434/api/chat"
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "gemma2:2b",
         "messages": messages,
-        "response_format": {"type": "json_object"},
-        "temperature": 0.5,
-        "max_tokens": 8000
-    }
-
-    max_retries = 3
-    retry_delay = 1.5
-    for attempt in range(max_retries):
-        try:
-            print(f"[Groq] Chat request (attempt {attempt + 1})...")
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                
-                if resp.status_code == 429:
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-                
-                resp.raise_for_status()
-                data = resp.json()
-                raw = data["choices"][0]["message"]["content"]
-                print(f"[Groq] Response: {raw[:300]}")
-                
-                try:
-                    res = json.loads(raw)
-                    response_text = res.get("response", raw).strip()
-                except Exception:
-                    response_text = raw.strip()
-                
-                conversation_history.append({"role": "assistant", "content": response_text})
-                return {"response": response_text}
-                
-        except Exception as e:
-            print(f"[Groq] Chat error (attempt {attempt + 1}): {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
-            else:
-                return {"response": f"Connection error, sir. {str(e)}"}
-
-
-async def transcribe_audio_with_gemini(audio_bytes: bytes, mime_type: str = "audio/webm") -> str:
-    """Transcribe audio bytes using Gemini API with key rotation."""
-    if not gemini_rotator.has_keys():
-        print("[Gemini] Transcription Error: No Gemini API keys are set.")
-        return ""
-
-    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-    
-    payload = {
-        "contents": [{
-            "parts": [
-                {
-                    "inlineData": {
-                        "mimeType": mime_type,
-                        "data": audio_b64
-                    }
-                },
-                {
-                    "text": "Transcribe this audio exactly. Return ONLY the transcribed text. Do not add any extra explanation or comments."
-                }
-            ]
-        }]
-    }
-
-    max_attempts = max(5, len(gemini_rotator.keys) * 2)
-    for attempt in range(max_attempts):
-        key = gemini_rotator.get_current_key()
-        if not key:
-            return ""
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
-        try:
-            print(f"[Gemini] Transcribing audio using key index {gemini_rotator.current_index}...")
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(url, json=payload)
-                
-                if resp.status_code in (429, 403):
-                    print(f"[Gemini] Transcription key index {gemini_rotator.current_index} hit rate limit / quota ({resp.status_code}). Rotating...")
-                    gemini_rotator.rotate_key()
-                    continue
-                
-                resp.raise_for_status()
-                data = resp.json()
-                
-                candidate = data.get("candidates", [{}])[0]
-                part = candidate.get("content", {}).get("parts", [{}])[0]
-                text = part.get("text", "").strip()
-                print(f"[Gemini] Transcription success: '{text}'")
-                return text
-        except Exception as e:
-            print(f"[Gemini] Transcription error on key index {gemini_rotator.current_index}: {e}")
-            gemini_rotator.rotate_key()
-            await asyncio.sleep(0.5)
-
-    return ""
-
-
-async def chat_with_gemini(user_message: str) -> dict:
-    """Send conversation history to Gemini and get response with key rotation."""
-    global conversation_history
-
-    if not gemini_rotator.has_keys():
-        return {"response": "Gemini API Keys are not set, sir. Please configure them in the .env file."}
-
-    conversation_history.append({"role": "user", "content": user_message})
-
-    if len(conversation_history) > MAX_HISTORY:
-        conversation_history = conversation_history[-MAX_HISTORY:]
-
-    contents = []
-    # Add history (mapping roles user->user, assistant->model)
-    for msg in conversation_history:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append({
-            "role": role,
-            "parts": [{"text": msg["content"]}]
-        })
-
-    payload = {
-        "contents": contents,
-        "systemInstruction": {
-            "parts": [{"text": SYSTEM_PROMPT + "\n\nCRITICAL: Return ONLY a valid JSON object with key 'response'. No markdown, no thinking, no extra text."}]
-        },
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "response": {"type": "STRING"}
-                },
-                "required": ["response"]
-            }
+        "stream": False,
+        "options": {
+            "temperature": 0.5
         }
     }
 
-    models = ["gemini-2.5-flash", "gemini-2.0-flash"]
-    max_attempts = max(5, len(gemini_rotator.keys) * 2)
-
-    for attempt in range(max_attempts):
-        key = gemini_rotator.get_current_key()
-        if not key:
-            break
-
-        for model in models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-            try:
-                print(f"[Gemini] Chat request to {model} using key index {gemini_rotator.current_index} (attempt {attempt + 1})...")
-                async with httpx.AsyncClient(timeout=60) as client:
-                    resp = await client.post(url, json=payload)
-                    
-                    if resp.status_code in (429, 403):
-                        print(f"[Gemini] {model} hit rate limit / quota (status {resp.status_code}) on key index {gemini_rotator.current_index}. Rotating...")
-                        gemini_rotator.rotate_key()
-                        break  # Break inner loop to try next key in outer loop
-                    
-                    if resp.status_code == 404:
-                        print(f"[Gemini] {model} returned 404. Trying fallback model...")
-                        continue
-                    
-                    resp.raise_for_status()
-                    data = resp.json()
-                    
-                    candidate = data.get("candidates", [{}])[0]
-                    part = candidate.get("content", {}).get("parts", [{}])[0]
-                    text_response = part.get("text", "{}").strip()
-                    print(f"[Gemini] Raw Model Output: {text_response[:300]}")
-                    
-                    try:
-                        res = json.loads(text_response)
-                        response_text = res.get("response", text_response).strip()
-                    except Exception:
-                        response_text = text_response.strip()
-                        
-                    conversation_history.append({"role": "assistant", "content": response_text})
-                    return {"response": response_text}
-            except Exception as e:
-                print(f"[Gemini] Error using {model} with key index {gemini_rotator.current_index}: {e}")
-                if "404" in str(e):
-                    continue
-                
-                gemini_rotator.rotate_key()
-                break  # Break inner loop to try next key
-
-        await asyncio.sleep(0.5)
-
-    return {"response": "All Gemini API keys are currently rate-limited or exhausted, sir. Please try again in a moment."}
+    try:
+        print(f"[Ollama] Chat request to gemma2:2b...")
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            raw = data.get("message", {}).get("content", "").strip()
+            print(f"[Ollama] Response: {raw[:300]}")
+            
+            response_text = raw
+            
+            conversation_history.append({"role": "assistant", "content": response_text})
+            return {"response": response_text}
+            
+    except Exception as e:
+        print(f"[Ollama] Chat error: {e}")
+        conversation_history.pop() # Remove the message so user can try again
+        return {"response": f"I couldn't connect to my local brain, sir. Is Ollama running? Error: {str(e)}"}
 
 
 # ── Action Parser ────────────────────────────────────────────────────────────
@@ -480,13 +247,10 @@ async def process_and_respond(ws: WebSocket, user_text: str, is_voice: bool = Fa
     """Common handler: get AI response, execute actions, speak, and reply."""
     await ws.send_json({"type": "status", "message": "Thinking..."})
     
-    provider = os.getenv("AI_PROVIDER", "gemini").lower()
-    if provider == "gemini" and gemini_rotator.has_keys():
-        print("[WS] Routing chat to Gemini...")
-        result = await chat_with_gemini(user_text)
-    else:
-        print("[WS] Routing chat to Groq...")
-        result = await chat_with_groq(user_text)
+    result = await chat_with_ollama(user_text)
+
+    if not result or not isinstance(result, dict):
+        result = {"response": "I'm having trouble processing your request, sir. Please try again."}
         
     ai_response = result.get("response", "")
     
@@ -505,7 +269,7 @@ async def process_and_respond(ws: WebSocket, user_text: str, is_voice: bool = Fa
     
     # Speak the response
     await ws.send_json({"type": "speaking", "active": True})
-    speak_thread = speak_async(ai_response)
+    speak_thread = speak_async(clean_response)  # Only speak cleaned text
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, speak_thread.join, 30)
     await ws.send_json({"type": "speaking", "active": False})
@@ -524,14 +288,8 @@ async def handle_audio_message(ws: WebSocket, msg: dict):
 
     await ws.send_json({"type": "status", "message": "Transcribing..."})
 
-    # Try transcription with Groq Whisper if key exists, as it is fast and robust
-    transcription = ""
-    if GROQ_API_KEY:
-        transcription = await transcribe_audio_with_groq(audio_bytes, mime_type)
-    
-    # Fallback to Gemini transcription if Groq isn't configured or failed
-    if not transcription and gemini_rotator.has_keys():
-        transcription = await transcribe_audio_with_gemini(audio_bytes, mime_type)
+    # Use Local Whisper
+    transcription = await transcribe_audio_with_local_whisper(audio_bytes, mime_type)
 
     if not transcription or len(transcription.strip()) < 2:
         print("[WS] Empty transcription, resuming listening.")
@@ -563,7 +321,16 @@ async def handle_text_message(ws: WebSocket, msg: dict):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[Friday] Starting up...")
+    print("[Friday] Starting up (Offline Local Mode)...")
+    # Preload the whisper model in background to make first voice command fast
+    def preload():
+        global whisper_model
+        try:
+            whisper_model = WhisperModel("base.en", device="cpu", compute_type="int8")
+            print("[Friday] Whisper model loaded successfully.")
+        except Exception as e:
+            print(f"[Friday] Failed to load Whisper: {e}")
+    threading.Thread(target=preload, daemon=True).start()
     yield
     print("[Friday] Shutting down...")
     stop_speaking()
@@ -579,18 +346,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.get("/health")
 async def health():
-    provider = os.getenv("AI_PROVIDER", "gemini").lower()
-    active_provider = "gemini" if (provider == "gemini" and gemini_rotator.has_keys()) else "groq"
     return {
         "status": "ok",
-        "groq": bool(GROQ_API_KEY),
-        "gemini": gemini_rotator.has_keys(),
-        "provider": active_provider
+        "provider": "ollama (local)",
+        "offline": True
     }
-
 
 @app.websocket("/ws/voice")
 async def voice_websocket(ws: WebSocket):

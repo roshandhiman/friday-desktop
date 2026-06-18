@@ -297,6 +297,25 @@ def search_google(query: str) -> dict:
     url = f"https://www.google.com/search?q={encoded}"
     return open_url(url)
 
+def play_spotify(query: str) -> dict:
+    """Play Spotify or search for a song on Spotify."""
+    try:
+        query = query.strip() if query else ""
+        if query:
+            # Open Spotify and search for the song
+            import urllib.parse
+            encoded = urllib.parse.quote(query)
+            subprocess.Popen(["open", f"spotify:search:{encoded}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            message = f"Opened Spotify search for {query}"
+        else:
+            # Just resume playback via AppleScript
+            subprocess.run(["osascript", "-e", 'tell application "Spotify" to play'], check=True)
+            message = "Playing Spotify"
+            
+        return {"success": True, "message": message}
+    except Exception as e:
+        return {"success": False, "message": f"Failed to play Spotify: {str(e)}"}
+
 
 def create_file(params: str) -> dict:
     """Create a file on disk. params format: path|content"""
@@ -359,6 +378,8 @@ def execute_action(action: str, params: str) -> dict:
         return search_youtube(params)
     elif action == "SEARCH_GOOGLE":
         return search_google(params)
+    elif action == "PLAY_SPOTIFY":
+        return play_spotify(params)
     elif action == "CREATE_FILE":
         return create_file(params)
     elif action == "OPEN_FILE":
