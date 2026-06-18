@@ -1,180 +1,153 @@
-# 🚀 Friday Desktop
+# 🚀 Friday Desktop (Jarvis Assistant)
 
-> A futuristic AI-powered desktop assistant built with **Electron + React + Vite**.
-
-Friday Desktop is a modern AI workspace application designed with a cinematic futuristic interface and built for scalability.  
-The architecture is modular, cleanly separated (frontend + backend), and structured for team collaboration.
+Friday is a futuristic, cinematic AI desktop assistant for macOS inspired by Jarvis from Iron Man. It combines an **Electron + React + Vite** frontend with a high-performance **FastAPI WebSocket** backend.
 
 ---
 
-## ✨ Tech Stack
-
-### 🖥 Frontend
-- Electron
-- React (Vite)
-- Tailwind CSS
-- Framer Motion
-- Lucide Icons
-
-### ⚙ Backend (In Progress)
-- Node.js
-- Express
-- REST API Architecture
-
----
-
-## 🧠 Features
-
-- Futuristic AI dashboard UI
-- Animated voice orb (GPU optimized)
-- Glassmorphism dark interface
-- Sidebar navigation layout
-- Chat panel (UI placeholder)
-- System monitor (UI placeholder)
-- Modular routing structure
-- Clean scalable architecture
-- Team-ready repository structure
-
----
-
-## 📂 Project Structure
+## ✨ Features & Architecture
 
 ```
-friday-desktop/
-│
-├── main/                     # Electron main process
-│
-├── renderer/                 # React frontend (Vite)
-│   ├── src/
-│   │   ├── components/
-│   │   ├── pages/
-│   │   ├── layout/
-│   │   └── index.css
-│
-├── backend/                  # Backend API (separate service)
-│   └── src/server.js
-│
-├── package.json
-└── README.md
+┌────────────────────────────────────────────────────────┐
+│                      ELECTRON APP                      │
+│ ┌──────────────────────┐      ┌──────────────────────┐ │
+│ │  React Frontend UI   │◄────►│  Electron Main Proc  │ │
+│ │  - WebGL Voice Orb   │      │  - IPC Bridging      │ │
+│ │  - Mic Recorder      │      │  - Backend Launcher  │ │
+│ └──────────┬───────────┘      └──────────────────────┘ │
+└────────────┼───────────────────────────────────────────┘
+             │ WebSocket Connection
+             ▼
+┌────────────────────────────────────────────────────────┐
+│                     PYTHON BACKEND                     │
+│               (FastAPI WebSocket Server)               │
+│                                                        │
+│   ┌────────────────────────────────────────────────┐   │
+│   │               AI COMPLETIONS                   │   │
+│   │ - Gemini Key Rotator (2.5-flash / 2.0-flash)   │   │
+│   │ - Groq Llama 3.3 70B Fallback                  │   │
+│   └──────────────────────┬─────────────────────────┘   │
+│                          │                             │
+│   ┌──────────────────────▼─────────────────────────┐   │
+│   │               VOICE TRANSCRIPTION              │   │
+│   │ - Groq Whisper (Ultra-fast / High accuracy)    │   │
+│   │ - Gemini Audio Fallback                        │   │
+│   └──────────────────────┬─────────────────────────┘   │
+│                          │                             │
+│   ┌──────────────────────▼─────────────────────────┐   │
+│   │                SPEECH SYNTHESIS                │   │
+│   │ - Native macOS `say` command (100% reliable)   │   │
+│   └──────────────────────┬─────────────────────────┘   │
+│                          │                             │
+│   ┌──────────────────────▼─────────────────────────┐   │
+│   │                SYSTEM EXECUTIONS               │   │
+│   │ - Subprocess (Run shell, VS Code, Apps)        │   │
+│   │ - AppleScript (WhatsApp deep links, Search)    │   │
+│   └────────────────────────────────────────────────┘   │
+└────────────────────────────────────────────────────────┘
 ```
+
+- **WebGL Voice Orb**: A beautifully designed, interactive particle orb that responds in real-time to thinking, listening, and speaking states.
+- **Gemini API Key Rotation**: Automatically rotates through a list of 5-10 Gemini API keys to bypass rate limits (`429`) and quota exhaustion (`403`).
+- **Flexible AI Providers**: Seamlessly switches between Gemini (`gemini-2.5-flash` / `gemini-2.0-flash`) and Groq (`llama-3.3-70b`) for processing user queries.
+- **Robust Transcription**: Prioritizes Groq Whisper API for lightning-fast speech-to-text, falling back to Gemini's native multimodal audio understanding if Groq is unavailable.
+- **Reliable Voice Output**: Utilizes the native macOS `say` synthesizer for offline, zero-latency text-to-speech.
+- **Interactive System Control**: Executable system commands parsed from AI output:
+  - `OPEN_APP:AppName` → Launches macOS applications (e.g., WhatsApp, VS Code, Spotify).
+  - `OPEN_URL:url` → Opens links in the default browser.
+  - `RUN_COMMAND:cmd` → Safe execution of shell commands.
+  - `SCREENSHOT` → Snaps a screenshot and saves it directly to your Desktop.
+  - `SEND_WHATSAPP:Contact|Message` → Deep links or automates sending messages.
+  - `SEARCH_GOOGLE:query` / `SEARCH_YOUTUBE:query` → Direct browser search action.
+  - `CREATE_FILE:path|content` → Creates files directly from code generated by Friday.
 
 ---
 
-## 🛠 Installation
+## 🛠 Prerequisites
 
-### 1️⃣ Clone Repository
+Ensure you have the following installed on your macOS system:
+1. **Node.js** (v18+) & **npm**
+2. **Python 3.9+** (ensure `pip` is available)
+3. Active API Keys for **Gemini** and/or **Groq**
 
+---
+
+## 🚀 Setup & Installation
+
+### 1️⃣ Clone the Repository & Install Dependencies
 ```bash
-git clone https://github.com/YOUR_USERNAME/friday-desktop.git
+git clone https://github.com/roshandhiman/friday-desktop.git
 cd friday-desktop
+
+# Install frontend dependencies
+npm install
+
+# Install backend dependencies
+cd backend
+pip3 install -r requirements.txt
+```
+
+### 2️⃣ Configure Environment Variables
+Create or edit `backend/.env` file:
+```env
+# AI Provider selection: "gemini" or "groq"
+AI_PROVIDER=gemini
+
+# --- Gemini API Key Rotation Config ---
+# You can define keys in any of the three formats below.
+# Friday will automatically load and rotate them to handle rate limits.
+
+# Format A: Comma-separated list (Ideal for 5-10 keys)
+GEMINI_API_KEYS=key1,key2,key3,key4,key5
+
+# Format B: Numbered keys
+# GEMINI_API_KEY_1=AIzaSyA...
+# GEMINI_API_KEY_2=AIzaSyB...
+
+# Format C: Standard single key fallback
+# GEMINI_API_KEY=AIzaSyDefault...
+
+# --- Groq API Configuration ---
+GROQ_API_KEY=gsk_...
 ```
 
 ---
 
-## 🖥 Run Frontend (Electron + React)
+## 🖥 How to Run
+
+You can run both frontend and backend concurrently from the root directory:
 
 ```bash
-npm install
 npm run dev
 ```
 
-This will start:
-- Vite Dev Server (Renderer)
-- Electron Application
+### Running Manually
+
+If you prefer starting the services in separate terminal windows:
+
+*   **Start the FastAPI Backend:**
+    ```bash
+    cd backend
+    python3 server.py
+    ```
+    *The backend runs on `http://127.0.0.1:8765`.*
+
+*   **Start the Electron + React Frontend:**
+    ```bash
+    # From workspace root
+    npm run dev:renderer  # Launches Vite server on port 5173
+    npm run dev:electron  # Launches the Electron container window
+    ```
 
 ---
 
-## ⚙ Run Backend (API Server)
+## 🧑‍💻 Operating Friday
 
-```bash
-cd backend
-npm install
-node src/server.js
-```
+Once started, click the mic orb to toggle listening/mute state or type your query in the prompt bar:
 
-Backend runs on:
-
-```
-http://localhost:5000
-```
-
----
-
-## 🌿 Branch Strategy
-
-| Branch         | Purpose                        |
-|---------------|--------------------------------|
-| main          | Stable production-ready code   |
-| frontend-dev  | UI & layout updates            |
-| backend-dev   | API & server development       |
-
----
-
-## 👥 Team Collaboration
-
-To add contributors:
-
-1. Go to Repository → Settings  
-2. Click "Collaborators"  
-3. Invite by GitHub username  
-
----
-
-## 🚀 Production Build
-
-To package the desktop application:
-
-```bash
-npm run build
-```
-
-Electron Builder will generate:
-- macOS `.dmg`
-- Windows `.exe`
-
----
-
-## 📌 Roadmap
-
-- [ ] Real microphone voice detection
-- [ ] Live system monitoring
-- [ ] AI backend integration
-- [ ] Authentication system
-- [ ] Database integration
-- [ ] Production auto-deployment
-- [ ] Cloud sync support
-
----
-
-## 🔒 Security Notes
-
-- Never commit API keys.
-- Use `.env` files for sensitive credentials.
-- Keep backend and frontend modular for better security.
-
----
-
-## 📜 License
-
-MIT License
-
----
-
-## 🧑‍💻 Author
-
-Developed by the Friday Team.
-
----
-
-## 🌌 Vision
-
-Friday Desktop aims to become a modular AI workspace platform featuring:
-
-- Voice interaction  
-- Intelligent automation  
-- Workflow orchestration  
-- Cross-platform support  
-
----
-
-Built with precision, performance, and futuristic design principles.
+*   **App Control:** *"Open Spotify"* or *"Launch WhatsApp"*
+*   **System Actions:** *"Take a screenshot"* or *"Check my system information"*
+*   **Web Queries:** *"Search Google for macOS shortcuts"* or *"Search YouTube for Sourav Joshi Vlogs"*
+*   **Coding & Creating Files:** *"Create a simple HTML page for a tic-tac-toe game"*
+    *   Friday will generate the code and automatically write it to your Desktop.
+    *   Say *"Open it"* to launch the newly created game in your default browser.
+*   **Communication:** *"Send a WhatsApp to Mom | I'll be home in 10 minutes"*

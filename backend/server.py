@@ -30,6 +30,55 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+class GeminiKeyRotator:
+    def __init__(self):
+        self.keys = []
+        self.current_index = 0
+        self.load_keys()
+
+    def load_keys(self):
+        # 1. Comma separated list
+        keys_str = os.getenv("GEMINI_API_KEYS", "")
+        if keys_str:
+            self.keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+        
+        # 2. Numbered variables (e.g. GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc.)
+        if not self.keys:
+            i = 1
+            while True:
+                key = os.getenv(f"GEMINI_API_KEY_{i}")
+                if not key:
+                    if i > 15:
+                        break
+                    i += 1
+                    continue
+                self.keys.append(key.strip())
+                i += 1
+        
+        # 3. Single key fallback
+        if not self.keys:
+            single_key = os.getenv("GEMINI_API_KEY")
+            if single_key:
+                self.keys.append(single_key.strip())
+
+        print(f"[GeminiRotator] Loaded {len(self.keys)} Gemini API keys.")
+
+    def get_current_key(self) -> str:
+        if not self.keys:
+            return ""
+        return self.keys[self.current_index]
+
+    def rotate_key(self):
+        if not self.keys:
+            return
+        self.current_index = (self.current_index + 1) % len(self.keys)
+        print(f"[GeminiRotator] Rotated key index to {self.current_index}")
+
+    def has_keys(self) -> bool:
+        return len(self.keys) > 0
+
+gemini_rotator = GeminiKeyRotator()
+
 # TTS control
 tts_process = None
 tts_lock = threading.Lock()
@@ -264,6 +313,154 @@ async def chat_with_groq(user_message: str) -> dict:
                 return {"response": f"Connection error, sir. {str(e)}"}
 
 
+async def transcribe_audio_with_gemini(audio_bytes: bytes, mime_type: str = "audio/webm") -> str:
+    """Transcribe audio bytes using Gemini API with key rotation."""
+    if not gemini_rotator.has_keys():
+        print("[Gemini] Transcription Error: No Gemini API keys are set.")
+        return ""
+
+    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+    
+    payload = {
+        "contents": [{
+            "parts": [
+                {
+                    "inlineData": {
+                        "mimeType": mime_type,
+                        "data": audio_b64
+                    }
+                },
+                {
+                    "text": "Transcribe this audio exactly. Return ONLY the transcribed text. Do not add any extra explanation or comments."
+                }
+            ]
+        }]
+    }
+
+    max_attempts = max(5, len(gemini_rotator.keys) * 2)
+    for attempt in range(max_attempts):
+        key = gemini_rotator.get_current_key()
+        if not key:
+            return ""
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
+        try:
+            print(f"[Gemini] Transcribing audio using key index {gemini_rotator.current_index}...")
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(url, json=payload)
+                
+                if resp.status_code in (429, 403):
+                    print(f"[Gemini] Transcription key index {gemini_rotator.current_index} hit rate limit / quota ({resp.status_code}). Rotating...")
+                    gemini_rotator.rotate_key()
+                    continue
+                
+                resp.raise_for_status()
+                data = resp.json()
+                
+                candidate = data.get("candidates", [{}])[0]
+                part = candidate.get("content", {}).get("parts", [{}])[0]
+                text = part.get("text", "").strip()
+                print(f"[Gemini] Transcription success: '{text}'")
+                return text
+        except Exception as e:
+            print(f"[Gemini] Transcription error on key index {gemini_rotator.current_index}: {e}")
+            gemini_rotator.rotate_key()
+            await asyncio.sleep(0.5)
+
+    return ""
+
+
+async def chat_with_gemini(user_message: str) -> dict:
+    """Send conversation history to Gemini and get response with key rotation."""
+    global conversation_history
+
+    if not gemini_rotator.has_keys():
+        return {"response": "Gemini API Keys are not set, sir. Please configure them in the .env file."}
+
+    conversation_history.append({"role": "user", "content": user_message})
+
+    if len(conversation_history) > MAX_HISTORY:
+        conversation_history = conversation_history[-MAX_HISTORY:]
+
+    contents = []
+    # Add history (mapping roles user->user, assistant->model)
+    for msg in conversation_history:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append({
+            "role": role,
+            "parts": [{"text": msg["content"]}]
+        })
+
+    payload = {
+        "contents": contents,
+        "systemInstruction": {
+            "parts": [{"text": SYSTEM_PROMPT + "\n\nCRITICAL: Return ONLY a valid JSON object with key 'response'. No markdown, no thinking, no extra text."}]
+        },
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "response": {"type": "STRING"}
+                },
+                "required": ["response"]
+            }
+        }
+    }
+
+    models = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    max_attempts = max(5, len(gemini_rotator.keys) * 2)
+
+    for attempt in range(max_attempts):
+        key = gemini_rotator.get_current_key()
+        if not key:
+            break
+
+        for model in models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            try:
+                print(f"[Gemini] Chat request to {model} using key index {gemini_rotator.current_index} (attempt {attempt + 1})...")
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(url, json=payload)
+                    
+                    if resp.status_code in (429, 403):
+                        print(f"[Gemini] {model} hit rate limit / quota (status {resp.status_code}) on key index {gemini_rotator.current_index}. Rotating...")
+                        gemini_rotator.rotate_key()
+                        break  # Break inner loop to try next key in outer loop
+                    
+                    if resp.status_code == 404:
+                        print(f"[Gemini] {model} returned 404. Trying fallback model...")
+                        continue
+                    
+                    resp.raise_for_status()
+                    data = resp.json()
+                    
+                    candidate = data.get("candidates", [{}])[0]
+                    part = candidate.get("content", {}).get("parts", [{}])[0]
+                    text_response = part.get("text", "{}").strip()
+                    print(f"[Gemini] Raw Model Output: {text_response[:300]}")
+                    
+                    try:
+                        res = json.loads(text_response)
+                        response_text = res.get("response", text_response).strip()
+                    except Exception:
+                        response_text = text_response.strip()
+                        
+                    conversation_history.append({"role": "assistant", "content": response_text})
+                    return {"response": response_text}
+            except Exception as e:
+                print(f"[Gemini] Error using {model} with key index {gemini_rotator.current_index}: {e}")
+                if "404" in str(e):
+                    continue
+                
+                gemini_rotator.rotate_key()
+                break  # Break inner loop to try next key
+
+        await asyncio.sleep(0.5)
+
+    return {"response": "All Gemini API keys are currently rate-limited or exhausted, sir. Please try again in a moment."}
+
+
 # ── Action Parser ────────────────────────────────────────────────────────────
 
 def parse_and_execute_actions(ai_response: str) -> list:
@@ -283,7 +480,14 @@ async def process_and_respond(ws: WebSocket, user_text: str, is_voice: bool = Fa
     """Common handler: get AI response, execute actions, speak, and reply."""
     await ws.send_json({"type": "status", "message": "Thinking..."})
     
-    result = await chat_with_groq(user_text)
+    provider = os.getenv("AI_PROVIDER", "gemini").lower()
+    if provider == "gemini" and gemini_rotator.has_keys():
+        print("[WS] Routing chat to Gemini...")
+        result = await chat_with_gemini(user_text)
+    else:
+        print("[WS] Routing chat to Groq...")
+        result = await chat_with_groq(user_text)
+        
     ai_response = result.get("response", "")
     
     # Execute actions
@@ -320,7 +524,14 @@ async def handle_audio_message(ws: WebSocket, msg: dict):
 
     await ws.send_json({"type": "status", "message": "Transcribing..."})
 
-    transcription = await transcribe_audio_with_groq(audio_bytes, mime_type)
+    # Try transcription with Groq Whisper if key exists, as it is fast and robust
+    transcription = ""
+    if GROQ_API_KEY:
+        transcription = await transcribe_audio_with_groq(audio_bytes, mime_type)
+    
+    # Fallback to Gemini transcription if Groq isn't configured or failed
+    if not transcription and gemini_rotator.has_keys():
+        transcription = await transcribe_audio_with_gemini(audio_bytes, mime_type)
 
     if not transcription or len(transcription.strip()) < 2:
         print("[WS] Empty transcription, resuming listening.")
@@ -371,7 +582,14 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "groq": bool(GROQ_API_KEY)}
+    provider = os.getenv("AI_PROVIDER", "gemini").lower()
+    active_provider = "gemini" if (provider == "gemini" and gemini_rotator.has_keys()) else "groq"
+    return {
+        "status": "ok",
+        "groq": bool(GROQ_API_KEY),
+        "gemini": gemini_rotator.has_keys(),
+        "provider": active_provider
+    }
 
 
 @app.websocket("/ws/voice")
