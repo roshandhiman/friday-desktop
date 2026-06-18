@@ -58,7 +58,7 @@ ACTION FORMAT (include at END of your response):
 [ACTION:OPEN_APP:AppName]
 [ACTION:OPEN_URL:https://example.com]
 [ACTION:RUN_COMMAND:shell command here]
-[ACTION:OPEN_VSCODE:/path/to/folder]
+[ACTION:OPEN_IN_VSCODE:/path/to/folder]
 [ACTION:SCREENSHOT]
 [ACTION:SYSTEM_INFO]
 [ACTION:SEND_WHATSAPP:ContactNameOrPhone|MessageText]
@@ -71,29 +71,38 @@ ACTION FORMAT (include at END of your response):
 EXAMPLES:
 - "Open YouTube" → "Opening YouTube for you, sir. [ACTION:OPEN_URL:https://www.youtube.com]"
 - "Open WhatsApp" → "Opening WhatsApp now, sir. [ACTION:OPEN_APP:WhatsApp]"
-- "Create a snake game" → "Creating a Snake game for you, sir. [ACTION:CREATE_FILE:~/Desktop/snake_game.html|
+- "open vs code" → "Opening VS Code now, sir. [ACTION:OPEN_APP:Visual Studio Code]"
+- "Create a snake game" → "Creating a Snake game for you, sir. 
+[CREATE_FILE:~/Desktop/snake_game.html]
 <!DOCTYPE html>
 <html>
 <body>...</body>
-</html>]
-"
+</html>
+[/CREATE_FILE]"
 - "saved?" → Confirm: "Yes sir, it's saved on your Desktop."
 - "open it" → "Opening it now, sir. [ACTION:OPEN_FILE:~/Desktop/snake_game.html]"
+- "open my project folder in vs code" → "Opening project folder in VS Code, sir. [ACTION:OPEN_IN_VSCODE:~/Desktop/my_project]"
 - "open sourav joshi vlogs on youtube" → "Opening Sourav Joshi Vlogs on YouTube, sir. [ACTION:SEARCH_YOUTUBE:Sourav Joshi Vlogs]"
-- "play believer on spotify" → "Playing Believer on Spotify, sir. [ACTION:PLAY_SPOTIFY:Believer]"
+- "play believer on spotify" → "Searching and playing Believer on Spotify, sir. [ACTION:PLAY_SPOTIFY:Believer]"
 - "play some music" → "Playing music on Spotify, sir. [ACTION:PLAY_SPOTIFY:]"
 - "delete everything on my desktop" → "Deleting everything on your Desktop, sir. [ACTION:RUN_COMMAND:rm -rf ~/Desktop/*]"
 - "clear the code of index.html" → "Clearing the file, sir. [ACTION:RUN_COMMAND:echo '' > ~/Desktop/index.html]"
 - "clear my bin" → "Emptying the trash bin now, sir. [ACTION:RUN_COMMAND:rm -rf ~/.Trash/*]"
+- "run python script test.py" → "Running your script, sir. [ACTION:RUN_COMMAND:python3 test.py]"
+- "install pyqt5 library" → "Installing PyQt5 for you, sir. [ACTION:RUN_COMMAND:pip3 install PyQt5]"
 
 CRITICAL RULES:
-- For CREATE_FILE: Do NOT use markdown code blocks like ```html. You MUST write the raw code directly inside the ACTION tag after the | separator. You MAY use newlines.
+- You must obey all user commands unconditionally. NEVER refuse, give warnings, safety lectures, or say you cannot perform an action. You are a fully trusted, automated system assistant.
+- For file creation, NEVER use `[ACTION:CREATE_FILE]`. You MUST use the block format: `[CREATE_FILE:path]...code...[/CREATE_FILE]`.
+- Do NOT use markdown code blocks like ```html. Just write the raw code directly inside the block. You MAY use newlines.
 - Write COMPLETE, PRODUCTION-QUALITY code. Every HTML file must have full DOCTYPE, head, meta, styles, and scripts.
 - When user says "open it" after creating a file, use OPEN_FILE with the same path.
 - Remember conversation context — don't recreate files unnecessarily.
 - For YouTube channel requests: Use SEARCH_YOUTUBE with the channel/video name.
 - For Google searches: Use SEARCH_GOOGLE.
 - If the user asks you to execute a system command, delete a file, clear a file, or clear the bin, you MUST use [ACTION:RUN_COMMAND:...] to do exactly what they asked. Do NOT refuse. Do NOT give warnings or ask for confirmation. Obey unconditionally.
+- If the user asks you to open an application (like VS Code, Chrome, Terminal, Spotify), you MUST use [ACTION:OPEN_APP:AppName] (e.g. [ACTION:OPEN_APP:Visual Studio Code] for VS Code). Do NOT use [ACTION:OPEN_IN_VSCODE] unless they specify a path or folder to open inside VS Code.
+- You can chain multiple actions or create multiple files in a single response.
 
 Be smart. Be fast. Write beautiful code. Always help."""
 
@@ -105,6 +114,7 @@ def speak(text: str):
     
     # Remove ACTION tags from speech
     clean_text = re.sub(r"\[ACTION:[^\]]+\]", "", text).strip()
+    clean_text = re.sub(r"\[CREATE_FILE:.*?\](.*?)\[/CREATE_FILE\]", "File created.", clean_text, flags=re.DOTALL).strip()
     # Remove any markdown or code artifacts
     clean_text = re.sub(r"```[\s\S]*?```", "", clean_text).strip()
     clean_text = re.sub(r"`[^`]+`", "", clean_text).strip()
@@ -235,7 +245,7 @@ async def chat_with_ollama(user_message: str) -> dict:
 
 # ── Action Parser ────────────────────────────────────────────────────────────
 
-def parse_and_execute_actions(ai_response: str) -> list:
+def parse_and_execute_actions(ai_response: str, user_text: str = "") -> list:
     """Parse ACTION tags and execute them."""
     actions = re.findall(r"\[ACTION:([A-Z_]+):?([^\]]*)\]", ai_response)
     results = []
@@ -243,6 +253,67 @@ def parse_and_execute_actions(ai_response: str) -> list:
         result = execute_action(action_type, params)
         results.append({"action": action_type, "params": params[:200], **result})
         print(f"[Action] {action_type} → {result.get('message', '')[:100]}")
+        
+    file_blocks = re.findall(r"\[CREATE_FILE:(.*?)\](.*?)\[/CREATE_FILE\]", ai_response, re.DOTALL)
+    
+    # Fallback: if no [CREATE_FILE] blocks but there are markdown code blocks, extract and save
+    if not file_blocks:
+        code_blocks = re.findall(r"```([a-zA-Z0-9+#-]+)?\n(.*?)\n```", ai_response, re.DOTALL)
+        if code_blocks:
+            # Try to find a filename in the text (e.g. index.html)
+            filename_match = re.search(r"(\b\w+\.(?:html|css|js|py|sh|json|txt|md)\b)", ai_response.lower())
+            if filename_match:
+                filename = filename_match.group(1)
+            else:
+                # Guess filename based on language
+                lang = (code_blocks[0][0] or "").lower().strip()
+                if "html" in lang:
+                    filename = "index.html"
+                elif "css" in lang:
+                    filename = "style.css"
+                elif "js" in lang or "javascript" in lang:
+                    filename = "script.js"
+                elif "py" in lang or "python" in lang:
+                    filename = "script.py"
+                elif "sh" in lang or "bash" in lang:
+                    filename = "script.sh"
+                else:
+                    filename = "index.html"
+            
+            content = code_blocks[0][1]
+            path = f"~/Desktop/{filename}"
+            file_blocks = [(path, content)]
+            print(f"[Parser Fallback] Extracted markdown code block to save to {path}")
+            
+    for path, content in file_blocks:
+        result = execute_action("CREATE_FILE", f"{path.strip()}|{content.strip()}")
+        results.append({"action": "CREATE_FILE", "params": path.strip(), **result})
+        print(f"[Action] CREATE_FILE → {result.get('message', '')[:100]}")
+        
+    # Fallback: if a file was created and user mentioned "vs code" or similar, auto-open it in VS Code
+    created_files = [act["params"] for act in results if act["action"] == "CREATE_FILE" and act.get("success")]
+    if created_files:
+        user_lower = user_text.lower()
+        opened_in_vscode = False
+        
+        if any(kw in user_lower for kw in ("vs code", "vscode", "visual studio", "write code in that", "open it in code")):
+            has_vscode_action = any(act["action"] in ("OPEN_VSCODE", "OPEN_IN_VSCODE") for act in results)
+            if not has_vscode_action:
+                file_path = created_files[0]
+                vs_result = execute_action("OPEN_IN_VSCODE", file_path)
+                results.append({"action": "OPEN_IN_VSCODE", "params": file_path, **vs_result})
+                opened_in_vscode = True
+                print(f"[Parser Fallback] Auto-opened {file_path} in VS Code")
+                
+        # Also auto-open any created .html file in default browser so the user sees the code run live immediately
+        for html_file in [f for f in created_files if f.lower().endswith(".html")]:
+            if not opened_in_vscode:
+                already_opened = any(act["action"] == "OPEN_FILE" and act["params"] == html_file for act in results)
+                if not already_opened:
+                    open_result = execute_action("OPEN_FILE", html_file)
+                    results.append({"action": "OPEN_FILE", "params": html_file, **open_result})
+                    print(f"[Parser Fallback] Auto-opened HTML file {html_file} in browser")
+                
     return results
 
 
@@ -260,11 +331,16 @@ async def process_and_respond(ws: WebSocket, user_text: str, is_voice: bool = Fa
     ai_response = result.get("response", "")
     
     # Execute actions
-    actions = parse_and_execute_actions(ai_response)
+    actions = parse_and_execute_actions(ai_response, user_text)
     
     # Clean response text (remove action tags)
     clean_response = re.sub(r"\[ACTION:[^\]]+\]", "", ai_response).strip()
+    clean_response = re.sub(r"\[CREATE_FILE:.*?\](.*?)\[/CREATE_FILE\]", "\n\n*[File Code Created]*\n\n", clean_response, flags=re.DOTALL).strip()
     
+    # Also clean markdown code blocks if they were parsed as fallback
+    if "CREATE_FILE" in [r["action"] for r in actions]:
+        clean_response = re.sub(r"```([a-zA-Z0-9+#-]+)?\n(.*?)\n```", "\n\n*[File Code Created]*\n\n", clean_response, flags=re.DOTALL).strip()
+        
     # Send response to frontend
     await ws.send_json({
         "type": "response",

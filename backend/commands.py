@@ -21,6 +21,7 @@ APP_ALIASES = {
     "vscode": "Visual Studio Code",
     "vs code": "Visual Studio Code",
     "visual studio code": "Visual Studio Code",
+    "visual studio": "Visual Studio Code",
     "code": "Visual Studio Code",
     "antigravity": "Antigravity",
     "terminal": "Terminal",
@@ -137,14 +138,25 @@ def run_shell(command: str) -> dict:
 
 def open_in_vscode(path: str) -> dict:
     """Open a file or folder in VS Code."""
+    path = path.strip()
+    # If path is empty, placeholder, or does not exist, fall back to opening VS Code app itself
+    if not path or "path/to" in path or path.lower() in ("path", "folder"):
+        return open_app("Visual Studio Code")
+
     expanded = os.path.expanduser(path)
     if not os.path.exists(expanded):
-        return {"success": False, "message": f"Path not found: {expanded}"}
+        # Fallback: check if the file/folder exists on the Desktop
+        basename = os.path.basename(expanded)
+        desktop_path = os.path.expanduser(f"~/Desktop/{basename}")
+        if os.path.exists(desktop_path):
+            expanded = desktop_path
+        else:
+            return open_app("Visual Studio Code")
     try:
         subprocess.Popen(["code", expanded], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"success": True, "message": f"Opened {expanded} in VS Code"}
     except Exception as e:
-        return {"success": False, "message": f"Failed to open VS Code: {str(e)}"}
+        return open_app("Visual Studio Code")
 
 
 def take_screenshot() -> dict:
@@ -298,17 +310,45 @@ def search_google(query: str) -> dict:
     return open_url(url)
 
 def play_spotify(query: str) -> dict:
-    """Play Spotify or search for a song on Spotify."""
+    """Play Spotify or search and play a song on Spotify."""
     try:
         query = query.strip() if query else ""
         if query:
-            # Open Spotify and search for the song
             import urllib.parse
             encoded = urllib.parse.quote(query)
             subprocess.Popen(["open", f"spotify:search:{encoded}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            message = f"Opened Spotify search for {query}"
+            
+            import threading
+            import time
+            def play_in_background():
+                time.sleep(2.0)
+                escaped_query = query.replace('"', '\\"')
+                script = f'''
+                tell application "Spotify" to activate
+                delay 0.5
+                tell application "System Events"
+                    keystroke "l" using {{command down}}
+                    delay 0.5
+                    keystroke "{escaped_query}"
+                    delay 1.5
+                    key code 125
+                    delay 0.2
+                    key code 125
+                    delay 0.2
+                    key code 125
+                    delay 0.2
+                    key code 125
+                    delay 0.2
+                    key code 125
+                    delay 0.2
+                    key code 36
+                end tell
+                '''
+                subprocess.run(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+            threading.Thread(target=play_in_background, daemon=True).start()
+            message = f"Searching and playing {query} on Spotify"
         else:
-            # Just resume playback via AppleScript
             subprocess.run(["osascript", "-e", 'tell application "Spotify" to play'], check=True)
             message = "Playing Spotify"
             
@@ -342,9 +382,16 @@ def create_file(params: str) -> dict:
 
 def open_file(path: str) -> dict:
     """Open a file with the default macOS application."""
-    expanded = os.path.expanduser(path.strip())
+    path = path.strip()
+    expanded = os.path.expanduser(path)
     if not os.path.exists(expanded):
-        return {"success": False, "message": f"File not found: {expanded}"}
+        # Fallback: check if the file exists on the Desktop
+        basename = os.path.basename(expanded)
+        desktop_path = os.path.expanduser(f"~/Desktop/{basename}")
+        if os.path.exists(desktop_path):
+            expanded = desktop_path
+        else:
+            return {"success": False, "message": f"File not found: {expanded}"}
     try:
         subprocess.Popen(["open", expanded], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"success": True, "message": f"Opened {expanded}"}
@@ -362,7 +409,7 @@ def execute_action(action: str, params: str) -> dict:
         return open_url(params)
     elif action == "RUN_COMMAND":
         return run_shell(params)
-    elif action == "OPEN_VSCODE":
+    elif action in ("OPEN_VSCODE", "OPEN_IN_VSCODE"):
         return open_in_vscode(params)
     elif action == "SCREENSHOT":
         return take_screenshot()
